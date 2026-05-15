@@ -1,9 +1,12 @@
 package com.androce
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -25,8 +28,16 @@ import com.androce.viewmodel.ScanViewModel
 enum class Screen { PROCESS_LIST, SEARCH, RESULTS }
 
 class MainActivity : ComponentActivity() {
+
+    private val notifPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* granted or denied — freeze notification may not show on denial */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         enableEdgeToEdge()
         setContent {
             AndroCETheme {

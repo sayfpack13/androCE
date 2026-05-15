@@ -8,7 +8,7 @@ import kotlinx.coroutines.withContext
 object MemoryReader {
 
     private const val TAG = "MemoryReader"
-    private const val CHUNK_SIZE = 4 * 1024 * 1024L // 4 MB
+    private const val CHUNK_SIZE = 512 * 1024L // 512 KB — safe chunk for Python reads
 
     suspend fun getReadableRegions(pid: Int): List<MemoryRegion> = withContext(Dispatchers.IO) {
         val regions = mutableListOf<MemoryRegion>()
@@ -17,7 +17,7 @@ object MemoryReader {
             AppLogger.d(TAG, "getReadableRegions pid=$pid shell success=${result.isSuccess} lines=${result.out.size}")
             for (line in result.out) {
                 val region = parseMapsLine(line) ?: continue
-                if (region.isReadable) regions.add(region)
+                if (region.isReadable && region.isUserMemory) regions.add(region)
             }
             AppLogger.d(TAG, "Readable regions found: ${regions.size}")
         } catch (e: Exception) {
@@ -41,16 +41,20 @@ object MemoryReader {
     }
 
     /**
-     * Read [length] bytes from [pid]'s memory at [address].
-     * Uses a dd-based approach through the root shell, encoding output as hex.
+     * Read [length] bytes from [pid]'s memory at [address] using Python hex dump.
      */
     suspend fun readBytes(pid: Int, address: Long, length: Int): ByteArray? =
         withContext(Dispatchers.IO) {
             try {
-                val skip = address
-                val result = Shell.cmd(
-                    "dd if=/proc/$pid/mem bs=1 skip=$skip count=$length 2>/dev/null | xxd -p | tr -d '\\n'"
-                ).exec()
+                val cmd = "python3 -c \"" +
+                    "import os,sys;" +
+                    "fd=os.open('/proc/$pid/mem',os.O_RDONLY);" +
+                    "os.lseek(fd,$address,os.SEEK_SET);" +
+                    "d=os.read(fd,$length);" +
+                    "os.close(fd);" +
+                    "sys.stdout.write(d.hex())" +
+                    "\" 2>/dev/null"
+                val result = Shell.cmd(cmd).exec()
                 val hex = result.out.joinToString("").trim()
                 if (hex.isEmpty()) return@withContext null
                 hexToBytes(hex)
