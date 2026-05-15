@@ -77,14 +77,12 @@ object MemoryReader {
 
             onProgress?.invoke(offset, regionSize)
 
-            val chunk = readBytes(pid, absoluteAddr, chunkSize) ?: run {
-                offset += chunkSize
-                continue
-            }
-
-            val found = searchBytes(chunk, pattern, wildcard)
-            for (rel in found) {
-                matches.add(absoluteAddr + rel)
+            val chunk = readBytes(pid, absoluteAddr, chunkSize)
+            if (chunk != null) {
+                val found = searchBytes(chunk, pattern, wildcard)
+                for (rel in found) {
+                    matches.add(absoluteAddr + rel)
+                }
             }
 
             offset += chunkSize
