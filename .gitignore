@@ -1,0 +1,41 @@
+# Gradle
+.gradle/
+build/
+**/build/
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasknamecache
+
+# Android Studio / IntelliJ
+*.iml
+.idea/
+*.iws
+*.ipr
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local SDK / keystore
+local.properties
+*.jks
+*.keystore
+
+# APK / AAB outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kotlin incremental compilation
+**/.kotlin/
+
+# Navigation SafeArgs generated
+app/src/main/java/**/directions/
+app/src/main/java/**/args/
