@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">androCE</string>
+    <string name="freeze_notification_channel">Memory Freeze</string>
+    <string name="freeze_notification_title">androCE Freeze Active</string>
+    <string name="freeze_notification_text">Holding values in memory…</string>
+</resources>
