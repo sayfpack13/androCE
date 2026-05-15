@@ -17,10 +17,13 @@ import com.androce.model.MemoryRegion
 import com.androce.model.ProcessInfo
 import com.androce.model.ScanResult
 import com.androce.model.ValueType
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed class ScanState {
     object Idle : ScanState()
@@ -63,7 +66,7 @@ class ScanViewModel : ViewModel() {
 
     fun bindFreezeService(context: Context) {
         val intent = Intent(context, FreezeService::class.java)
-        context.startForegroundService(intent)
+        context.startService(intent)
         context.bindService(intent, freezeServiceConnection, Context.BIND_AUTO_CREATE)
     }
 
@@ -100,11 +103,14 @@ class ScanViewModel : ViewModel() {
         }
 
         scanJob?.cancel()
-        scanJob = viewModelScope.launch {
+        scanJob = viewModelScope.launch(Dispatchers.Main) {
             _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
+            delay(32)
             try {
-                val regionList = _regions.value.ifEmpty {
-                    MemoryReader.getReadableRegions(pid).also { _regions.value = it }
+                val regionList = withContext(Dispatchers.IO) {
+                    _regions.value.ifEmpty {
+                        MemoryReader.getReadableRegions(pid).also { _regions.value = it }
+                    }
                 }
                 val found = Scanner.firstScan(
                     pid, selectedValueType, pattern, wildcard, regionList
@@ -133,8 +139,9 @@ class ScanViewModel : ViewModel() {
         }
 
         scanJob?.cancel()
-        scanJob = viewModelScope.launch {
+        scanJob = viewModelScope.launch(Dispatchers.Main) {
             _scanState.value = ScanState.Scanning(ScanProgress(0, previous.size, 0))
+            delay(32)
             try {
                 val found = Scanner.refinedScan(pid, previous, pattern, wildcard) { p ->
                     _scanState.value = ScanState.Scanning(p)

@@ -1,19 +1,30 @@
 package com.androce.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Memory
@@ -34,19 +45,31 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.model.ProcessInfo
 import com.androce.ui.theme.Accent
+import com.androce.ui.theme.Background
 import com.androce.ui.theme.Primary
+import com.androce.ui.theme.PrimaryDim
+import com.androce.ui.theme.Surface
+import com.androce.ui.theme.SurfaceHigh
 import com.androce.ui.theme.SurfaceVariant
 import com.androce.viewmodel.ProcessListState
 import com.androce.viewmodel.ProcessViewModel
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,16 +87,42 @@ fun ProcessListScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        "androCE",
-                        color = Primary,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 22.sp
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    Brush.linearGradient(listOf(Primary, Accent))
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Memory,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                "androCE",
+                                color = OnBackground,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 18.sp
+                            )
+                            Text(
+                                "Memory Scanner",
+                                color = Primary,
+                                fontSize = 10.sp,
+                                letterSpacing = 1.5.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Surface),
                 actions = {
                     IconButton(onClick = { viewModel.loadProcesses() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary)
@@ -81,55 +130,59 @@ fun ProcessListScreen(
                 }
             )
         },
-        containerColor = MaterialTheme.colorScheme.background
+        containerColor = Background
     ) { padding ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
+        Column(Modifier.fillMaxSize().padding(padding)) {
+
             OutlinedTextField(
                 value = query,
                 onValueChange = { viewModel.searchQuery.value = it },
-                placeholder = { Text("Search process / PID…", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)) },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Primary) },
+                placeholder = {
+                    Text(
+                        "Search app or PID…",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                        fontSize = 14.sp
+                    )
+                },
+                leadingIcon = {
+                    Icon(Icons.Default.Search, contentDescription = null, tint = Primary, modifier = Modifier.size(20.dp))
+                },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                shape = RoundedCornerShape(12.dp),
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                shape = RoundedCornerShape(14.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Primary,
-                    unfocusedBorderColor = SurfaceVariant,
-                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                    unfocusedBorderColor = SurfaceHigh,
+                    focusedContainerColor = SurfaceVariant,
+                    unfocusedContainerColor = SurfaceVariant,
+                    focusedTextColor = OnBackground,
+                    unfocusedTextColor = OnBackground,
                     cursorColor = Primary
                 ),
                 singleLine = true
             )
 
             when (state) {
-                is ProcessListState.Loading -> {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(color = Primary)
-                            Spacer(Modifier.size(12.dp))
-                            Text("Loading processes…", color = MaterialTheme.colorScheme.onSurface)
-                        }
-                    }
-                }
-                is ProcessListState.Error -> {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text(
-                            "Error: ${(state as ProcessListState.Error).message}",
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.padding(16.dp)
-                        )
-                    }
-                }
+                is ProcessListState.Loading -> LoadingView()
+                is ProcessListState.Error -> ErrorView((state as ProcessListState.Error).message)
                 else -> {
-                    LazyColumn(Modifier.fillMaxSize()) {
-                        items(filtered, key = { it.pid }) { process ->
-                            ProcessRow(process = process, onClick = { onProcessSelected(process) })
+                    AnimatedVisibility(
+                        visible = filtered.isNotEmpty(),
+                        enter = fadeIn(tween(300))
+                    ) {
+                        LazyColumn(
+                            Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            itemsIndexed(filtered, key = { _, p -> p.pid }) { index, process ->
+                                AnimatedProcessRow(
+                                    process = process,
+                                    index = index,
+                                    onClick = { onProcessSelected(process) }
+                                )
+                            }
                         }
                     }
                 }
@@ -139,44 +192,128 @@ fun ProcessListScreen(
 }
 
 @Composable
+private fun LoadingView() {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val scale by infiniteTransition.animateFloat(
+        initialValue = 0.9f, targetValue = 1.1f,
+        animationSpec = infiniteRepeatable(tween(800, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "scale"
+    )
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Box(contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    color = Primary,
+                    modifier = Modifier.size(56.dp),
+                    strokeWidth = 3.dp
+                )
+                Icon(
+                    Icons.Default.Memory,
+                    contentDescription = null,
+                    tint = Accent,
+                    modifier = Modifier.size(24.dp).scale(scale)
+                )
+            }
+            Text("Scanning processes…", color = OnSurface, fontSize = 14.sp)
+        }
+    }
+}
+
+@Composable
+private fun ErrorView(message: String) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .padding(24.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(SurfaceVariant)
+                .padding(24.dp)
+        ) {
+            Text("⚠", fontSize = 32.sp)
+            Spacer(Modifier.height(8.dp))
+            Text("Failed to load processes", color = OnBackground, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(4.dp))
+            Text(message, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun AnimatedProcessRow(process: ProcessInfo, index: Int, onClick: () -> Unit) {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(index.coerceAtMost(20) * 30L)
+        visible = true
+    }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(200)) + slideInVertically(tween(200)) { it / 2 }
+    ) {
+        ProcessRow(process = process, onClick = onClick)
+    }
+}
+
+@Composable
 private fun ProcessRow(process: ProcessInfo, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(SurfaceVariant)
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(SurfaceVariant),
+                .size(42.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Brush.linearGradient(listOf(PrimaryDim.copy(alpha = 0.4f), Accent.copy(alpha = 0.15f)))),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Default.Memory, contentDescription = null, tint = Accent, modifier = Modifier.size(24.dp))
+            Text(
+                text = process.name.take(1).uppercase(),
+                color = Primary,
+                fontWeight = FontWeight.Bold,
+                fontSize = 17.sp
+            )
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
                 text = process.name,
-                color = MaterialTheme.colorScheme.onBackground,
+                color = OnBackground,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 15.sp,
-                maxLines = 1
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = process.packageName,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                fontSize = 12.sp,
-                maxLines = 1
+                color = OnSurface,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
-        Text(
-            text = "PID ${process.pid}",
-            color = Primary,
-            fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace
-        )
+        Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(SurfaceHigh)
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+        ) {
+            Text(
+                text = "${process.pid}",
+                color = Accent,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Medium
+            )
+        }
     }
 }
+
+private val OnBackground = Color(0xFFF0EEFF)
+private val OnSurface = Color(0xFFB0AACC)

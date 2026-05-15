@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,11 +34,24 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { /* granted or denied — freeze notification may not show on denial */ }
 
+    private val currentScreen = mutableStateOf(Screen.PROCESS_LIST)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                when (currentScreen.value) {
+                    Screen.RESULTS -> currentScreen.value = Screen.SEARCH
+                    Screen.SEARCH -> currentScreen.value = Screen.PROCESS_LIST
+                    Screen.PROCESS_LIST -> finish()
+                }
+            }
+        })
+
         enableEdgeToEdge()
         setContent {
             AndroCETheme {
@@ -49,7 +63,7 @@ class MainActivity : ComponentActivity() {
                     val scanVm: ScanViewModel = viewModel()
                     val context = LocalContext.current
 
-                    var screen by remember { mutableStateOf(Screen.PROCESS_LIST) }
+                    var screen by remember { currentScreen }
 
                     DisposableEffect(Unit) {
                         scanVm.bindFreezeService(context)

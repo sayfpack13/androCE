@@ -4,12 +4,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.androce.core.ProcessLister
 import com.androce.model.ProcessInfo
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed class ProcessListState {
     object Idle : ProcessListState()
@@ -36,10 +39,11 @@ class ProcessViewModel : ViewModel() {
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun loadProcesses() {
-        _state.value = ProcessListState.Loading
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.Main) {
+            _state.value = ProcessListState.Loading
+            delay(32) // let Compose render the spinner frame before blocking IO starts
             try {
-                val processes = ProcessLister.listProcesses()
+                val processes = withContext(Dispatchers.IO) { ProcessLister.listProcesses() }
                 _allProcesses.value = processes
                 _state.value = ProcessListState.Success(processes)
             } catch (e: Exception) {

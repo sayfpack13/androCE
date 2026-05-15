@@ -36,15 +36,6 @@ class FreezeService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.freeze_notification_title))
-            .setContentText(getString(R.string.freeze_notification_text))
-            .setSmallIcon(android.R.drawable.ic_media_pause)
-            .setOngoing(true)
-            .build()
-
-        startForeground(NOTIFICATION_ID, notification)
-        startFreezeLoop()
         return START_STICKY
     }
 
@@ -54,6 +45,7 @@ class FreezeService : Service() {
         synchronized(frozenEntries) {
             frozenEntries[address] = FrozenEntry(pid, address, bytes.copyOf())
         }
+        showForegroundNotification()
         if (freezeJob == null || !freezeJob!!.isActive) startFreezeLoop()
     }
 
@@ -61,12 +53,16 @@ class FreezeService : Service() {
         synchronized(frozenEntries) {
             frozenEntries.remove(address)
         }
-        if (frozenEntries.isEmpty()) stopFreezeLoop()
+        if (frozenEntries.isEmpty()) {
+            stopFreezeLoop()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
     }
 
     fun clearAll() {
         synchronized(frozenEntries) { frozenEntries.clear() }
         stopFreezeLoop()
+        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     fun isFrozen(address: Long): Boolean = synchronized(frozenEntries) { frozenEntries.containsKey(address) }
@@ -91,6 +87,18 @@ class FreezeService : Service() {
     private fun stopFreezeLoop() {
         freezeJob?.cancel()
         freezeJob = null
+    }
+
+    private fun showForegroundNotification() {
+        val count = synchronized(frozenEntries) { frozenEntries.size }
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(getString(R.string.freeze_notification_title))
+            .setContentText("$count address${if (count != 1) "es" else ""} frozen")
+            .setSmallIcon(android.R.drawable.ic_media_pause)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .build()
+        startForeground(NOTIFICATION_ID, notification)
     }
 
     private fun createNotificationChannel() {
