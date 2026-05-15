@@ -65,11 +65,6 @@ class MainActivity : ComponentActivity() {
 
                     var screen by remember { currentScreen }
 
-                    DisposableEffect(Unit) {
-                        scanVm.bindFreezeService(context)
-                        onDispose { scanVm.unbindFreezeService(context) }
-                    }
-
                     when (screen) {
                         Screen.PROCESS_LIST -> ProcessListScreen(
                             viewModel = processVm,

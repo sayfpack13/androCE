@@ -124,40 +124,135 @@ class ScanViewModel : ViewModel() {
 
     fun firstScan() {
         val pid = selectedProcess?.pid ?: return
-        val (pattern, wildcard) = try {
-            ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
-        } catch (e: Exception) {
-            _scanState.value = ScanState.Error("Invalid input: ${e.message}")
-            return
-        }
-        if (pattern.isEmpty()) {
-            _scanState.value = ScanState.Error("Pattern is empty"); return
-        }
 
-        scanJob?.cancel()
-        Scanner.paused = false
-        _isPaused.value = false
-        scanJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val found = Scanner.firstScan(
-                    pid, selectedValueType, pattern, wildcard, _regions.value, _regionFilter.value
-                ) { p ->
+        if (selectedValueType == com.androce.model.ValueType.ALL) {
+            // Scan across all numeric types
+            scanJob?.cancel()
+            scanJob = viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    withContext(Dispatchers.Main) {
+                        _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
+                    }
+
+                    val numericTypes = listOf(
+                        com.androce.model.ValueType.BYTE1, com.androce.model.ValueType.BYTE2,
+                        com.androce.model.ValueType.BYTE4, com.androce.model.ValueType.BYTE8,
+                        com.androce.model.ValueType.FLOAT, com.androce.model.ValueType.DOUBLE
+                    )
+
+                    val allResults = mutableListOf<com.androce.model.ScanResult>()
+                    for ((idx, type) in numericTypes.withIndex()) {
+                        if (!isActive) break
+                        while (Scanner.paused) {
+                            delay(100); if (!isActive) break
+                        }
+
+                        val (pattern, wildcard) = try {
+                            com.androce.core.ValueEncoder.encodeSearchValue(
+                                searchInput,
+                                type,
+                                xorKey
+                            )
+                        } catch (e: Exception) {
+                            continue
+                        }
+
+                        AppLogger.d(
+                            "ScanViewModel",
+                            "firstScan ALL: scanning type=$type pattern=${
+                                pattern.joinToString(" ") {
+                                    "%02x".format(it)
+                                }
+                            }"
+                        )
+
+                        val results = Scanner.firstScan(
+                            pid = pid,
+                            valueType = type,
+                            pattern = pattern,
+                            wildcard = wildcard,
+                            regions = _regions.value,
+                            regionFilter = _regionFilter.value,
+                            onProgress = { progress ->
+                                if (isActive) {
+                                    viewModelScope.launch(Dispatchers.Main) {
+                                        _scanState.value =
+                                            ScanState.Scanning(progress.copy(foundCount = allResults.size + progress.foundCount))
+                                    }
+                                }
+                            }
+                        )
+                        allResults.addAll(results)
+                    }
+
                     if (isActive) {
-                        viewModelScope.launch(Dispatchers.Main) {
-                            _scanState.value = ScanState.Scanning(p)
+                        withContext(Dispatchers.Main) {
+                            _results.value = allResults
+                            _scanState.value = ScanState.Done(allResults)
+                        }
+                        AppLogger.d(
+                            "ScanViewModel",
+                            "firstScan ALL done: total found=${allResults.size}"
+                        )
+                    }
+                } catch (e: Exception) {
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _scanState.value = ScanState.Error(e.message ?: "Scan failed")
                         }
                     }
                 }
-                if (isActive) {
-                    withContext(Dispatchers.Main) {
-                        _results.value = found
-                        _scanState.value = ScanState.Done(found)
-                    }
-                }
+            }
+        } else {
+            // Normal single-type scan
+            val (pattern, wildcard) = try {
+                ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
             } catch (e: Exception) {
-                if (isActive) {
+                viewModelScope.launch(Dispatchers.Main) {
+                    _scanState.value = ScanState.Error(e.message ?: "Invalid value")
+                }
+                return
+            }
+
+            AppLogger.d(
+                "ScanViewModel",
+                "firstScan: input='$searchInput' type=$selectedValueType xorKey=$xorKey pattern=${
+                    pattern.joinToString(" ") { "%02x".format(it) }
+                }"
+            )
+
+            scanJob?.cancel()
+            scanJob = viewModelScope.launch(Dispatchers.IO) {
+                try {
                     withContext(Dispatchers.Main) {
-                        _scanState.value = ScanState.Error(e.message ?: "Scan failed")
+                        _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
+                    }
+                    val results = Scanner.firstScan(
+                        pid = pid,
+                        valueType = selectedValueType,
+                        pattern = pattern,
+                        wildcard = wildcard,
+                        regions = _regions.value,
+                        regionFilter = _regionFilter.value,
+                        onProgress = { progress ->
+                            if (isActive) {
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    _scanState.value = ScanState.Scanning(progress)
+                                }
+                            }
+                        }
+                    )
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _results.value = results
+                            _scanState.value = ScanState.Done(results)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _scanState.value = ScanState.Error(e.message ?: "Scan failed")
+                        }
                     }
                 }
             }
@@ -166,34 +261,106 @@ class ScanViewModel : ViewModel() {
 
     fun unknownInitialScan() {
         val pid = selectedProcess?.pid ?: return
-        if (selectedValueType.isVariableLength) {
-            _scanState.value = ScanState.Error("Unknown initial requires a fixed-size type")
-            return
-        }
-        scanJob?.cancel()
-        Scanner.paused = false
-        _isPaused.value = false
-        scanJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val found = Scanner.unknownInitialScan(
-                    pid, selectedValueType, _regions.value, _regionFilter.value
-                ) { p ->
+
+        if (selectedValueType == com.androce.model.ValueType.ALL) {
+            // Snapshot all numeric types
+            scanJob?.cancel()
+            Scanner.paused = false
+            _isPaused.value = false
+            scanJob = viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val numericTypes = listOf(
+                        com.androce.model.ValueType.BYTE1, com.androce.model.ValueType.BYTE2,
+                        com.androce.model.ValueType.BYTE4, com.androce.model.ValueType.BYTE8,
+                        com.androce.model.ValueType.FLOAT, com.androce.model.ValueType.DOUBLE
+                    )
+
+                    val allResults = mutableListOf<com.androce.model.ScanResult>()
+                    for (type in numericTypes) {
+                        if (!isActive) break
+                        while (Scanner.paused) {
+                            delay(100); if (!isActive) break
+                        }
+
+                        val found = Scanner.unknownInitialScan(
+                            pid, type, _regions.value, _regionFilter.value
+                        ) { p ->
+                            if (isActive) {
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    _scanState.value =
+                                        ScanState.Scanning(p.copy(foundCount = allResults.size + p.foundCount))
+                                }
+                            }
+                        }
+                        allResults.addAll(found)
+                    }
+
                     if (isActive) {
-                        viewModelScope.launch(Dispatchers.Main) {
-                            _scanState.value = ScanState.Scanning(p)
+                        AppLogger.d(
+                            "ScanViewModel",
+                            "unknownInitialScan ALL: found=${allResults.size}"
+                        )
+                        withContext(Dispatchers.Main) {
+                            _results.value = allResults
+                            _scanState.value = ScanState.Done(allResults)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _scanState.value = ScanState.Error(e.message ?: "Snapshot failed")
                         }
                     }
                 }
-                if (isActive) {
-                    withContext(Dispatchers.Main) {
-                        _results.value = found
-                        _scanState.value = ScanState.Done(found)
+            }
+        } else {
+            // Normal single-type scan
+            if (selectedValueType.isVariableLength) {
+                _scanState.value = ScanState.Error("Unknown initial requires a fixed-size type")
+                return
+            }
+            AppLogger.d("ScanViewModel", "unknownInitialScan: type=$selectedValueType")
+            scanJob?.cancel()
+            Scanner.paused = false
+            _isPaused.value = false
+            scanJob = viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val found = Scanner.unknownInitialScan(
+                        pid, selectedValueType, _regions.value, _regionFilter.value
+                    ) { p ->
+                        if (isActive) {
+                            viewModelScope.launch(Dispatchers.Main) {
+                                _scanState.value = ScanState.Scanning(p)
+                            }
+                        }
                     }
-                }
-            } catch (e: Exception) {
-                if (isActive) {
-                    withContext(Dispatchers.Main) {
-                        _scanState.value = ScanState.Error(e.message ?: "Snapshot failed")
+                    if (isActive) {
+                        // Log sample values for debugging
+                        val sample = found.take(5).map { r ->
+                            val value = when (selectedValueType) {
+                                ValueType.BYTE4 -> r.currentBytes.let {
+                                    java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+                                }.toString()
+                                ValueType.FLOAT -> r.currentBytes.let {
+                                    java.lang.Float.intBitsToFloat(
+                                        java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+                                    )
+                                }.toString()
+                                else -> r.currentBytes.joinToString(" ") { "%02x".format(it) }
+                            }
+                            "0x${r.address.toString(16)}=$value"
+                        }
+                        AppLogger.d("ScanViewModel", "unknownInitialScan: found=${found.size} samples=$sample")
+                        withContext(Dispatchers.Main) {
+                            _results.value = found
+                            _scanState.value = ScanState.Done(found)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _scanState.value = ScanState.Error(e.message ?: "Snapshot failed")
+                        }
                     }
                 }
             }
@@ -203,7 +370,9 @@ class ScanViewModel : ViewModel() {
     fun refinedScan() {
         val pid = selectedProcess?.pid ?: return
         val previous = _results.value
-        if (previous.isEmpty()) { firstScan(); return }
+        if (previous.isEmpty()) {
+            firstScan(); return
+        }
         val (pattern, wildcard) = try {
             ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
         } catch (e: Exception) {
@@ -261,6 +430,9 @@ class ScanViewModel : ViewModel() {
         }
         if (op.needsValue && operand1 == null) {
             _scanState.value = ScanState.Error("${op.label} requires a value"); return
+        }
+        if (op == ScanComparison.BETWEEN && operand2 == null) {
+            _scanState.value = ScanState.Error("Between requires both min and max values"); return
         }
         scanJob?.cancel()
         scanJob = viewModelScope.launch(Dispatchers.IO) {
@@ -367,7 +539,7 @@ class ScanViewModel : ViewModel() {
 
     // ---- Cheat tables ----
 
-    private fun tablesDir(): File {
+    fun tablesDir(): File {
         val base = AppLogger.filesDir ?: return File("/data/local/tmp/androce_tables")
         return File(base, "tables").apply { mkdirs() }
     }
@@ -385,7 +557,11 @@ class ScanViewModel : ViewModel() {
                     label = "",
                     valueType = r.valueType,
                     frozen = r.frozen,
-                    frozenValueHex = if (r.frozen) r.currentBytes.joinToString("") { "%02x".format(it) } else null
+                    frozenValueHex = if (r.frozen) r.currentBytes.joinToString("") {
+                        "%02x".format(
+                            it
+                        )
+                    } else null
                 )
             }
             val table = CheatTable(
@@ -409,7 +585,9 @@ class ScanViewModel : ViewModel() {
             // Reconstruct ScanResults; if PID matches, refresh current values.
             val rebuilt = table.entries.map { e ->
                 val bytes = e.frozenValueHex?.let { hex ->
-                    ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+                    ByteArray(hex.length / 2) { i ->
+                        hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+                    }
                 } ?: ByteArray(if (e.valueType.byteSize > 0) e.valueType.byteSize else 4)
                 ScanResult(
                     address = e.address,

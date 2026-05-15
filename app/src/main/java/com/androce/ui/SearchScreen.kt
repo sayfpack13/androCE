@@ -118,13 +118,6 @@ fun SearchScreen(
     var rangeMax by remember { mutableStateOf(viewModel.rangeMax) }
     var selectedTab by remember { mutableStateOf(0) }
 
-    // Auto-navigate to results when scan completes
-    LaunchedEffect(scanState) {
-        if (scanState is ScanState.Done && (scanState as ScanState.Done).results.isNotEmpty()) {
-            onViewResults()
-        }
-    }
-
     // When scan starts, jump to Scan tab
     LaunchedEffect(scanState is ScanState.Scanning) {
         if (scanState is ScanState.Scanning) selectedTab = 1
@@ -135,10 +128,11 @@ fun SearchScreen(
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         viewModel.searchInput = searchInput
         viewModel.selectedValueType = selectedType
+        if (viewModel.regions.value.isEmpty()) {
+            viewModel.loadRegions()
+        }
         viewModel.firstScan()
     }
-
-    LaunchedEffect(Unit) { viewModel.loadRegions() }
 
     val tabs = listOf(
         Icons.Default.Tune to "Configure",
@@ -820,6 +814,7 @@ private fun searchHint(type: ValueType): String = when (type) {
     ValueType.BYTE_ARRAY -> "Hex bytes e.g. FF 4A ?? 00"
     ValueType.XOR4 -> "Int (XOR with key)"
     ValueType.XOR8 -> "Long (XOR with key)"
+    ValueType.ALL -> "All numeric types"
 }
 
 private fun keyboardTypeFor(type: ValueType): KeyboardType = when (type) {

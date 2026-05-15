@@ -8,7 +8,6 @@ import kotlinx.coroutines.withContext
 object MemoryReader {
 
     private const val TAG = "MemoryReader"
-    private const val CHUNK_SIZE = 512 * 1024L // 512 KB — safe chunk for Python reads
     const val MAX_RESULTS = 500_000
 
     /**
@@ -27,7 +26,10 @@ object MemoryReader {
                 AppLogger.e(TAG, "Failed to write $tag script", e)
                 return@withContext ScriptResult(emptyList(), emptyMap())
             }
-            val result = Shell.cmd("python3 $scriptFile 2>/dev/null; rm -f $scriptFile").exec()
+            // Try python3 first, fall back to python if python3 binary is not found
+            val result = Shell.cmd(
+                "if command -v python3 >/dev/null 2>&1; then python3 $scriptFile 2>/dev/null; else python $scriptFile 2>/dev/null; fi; rm -f $scriptFile"
+            ).exec()
             val stdout = mutableListOf<String>()
             val meta = mutableMapOf<String, String>()
             for (line in result.out) {
@@ -76,16 +78,20 @@ object MemoryReader {
     suspend fun readBytes(pid: Int, address: Long, length: Int): ByteArray? =
         withContext(Dispatchers.IO) {
             try {
-                val cmd = "python3 -c \"" +
-                    "import os,sys;" +
-                    "fd=os.open('/proc/$pid/mem',os.O_RDONLY);" +
-                    "os.lseek(fd,$address,os.SEEK_SET);" +
-                    "d=os.read(fd,$length);" +
-                    "os.close(fd);" +
-                    "sys.stdout.write(d.hex())" +
-                    "\" 2>/dev/null"
-                val result = Shell.cmd(cmd).exec()
-                val hex = result.out.joinToString("").trim()
+                val scriptBody = """
+import os
+try:
+    fd = os.open('/proc/$pid/mem', os.O_RDONLY)
+    os.lseek(fd, $address, os.SEEK_SET)
+    d = os.read(fd, $length)
+    os.close(fd)
+    if len(d) == $length:
+        print(d.hex())
+except Exception:
+    pass
+""".trimIndent()
+                val res = runPythonScript(scriptBody, tag = "read1_$pid")
+                val hex = res.stdout.joinToString("").trim()
                 if (hex.isEmpty()) return@withContext null
                 hexToBytes(hex)
             } catch (e: Exception) {
@@ -121,16 +127,23 @@ n = len(pat)
 cap = $maxResults
 found = 0
 skipped = 0
+chunk = 4 * 1024 * 1024  # 4 MB
 for start, size in [$regionList]:
     if found >= cap: break
     try:
-        os.lseek(fd, start, os.SEEK_SET)
-        data = os.read(fd, size)
-        i = data.find(pat)
-        while i >= 0 and found < cap:
-            print(start + i)
-            found += 1
-            i = data.find(pat, i + n)
+        off = 0
+        while off < size and found < cap:
+            rsize = min(chunk, size - off)
+            os.lseek(fd, start + off, os.SEEK_SET)
+            data = os.read(fd, rsize)
+            if not data: break
+            i = data.find(pat)
+            while i >= 0 and found < cap:
+                print(start + off + i)
+                found += 1
+                i = data.find(pat, i + n)
+            # Overlap by pattern length to catch matches spanning chunks
+            off += max(1, rsize - n + 1)
     except Exception:
         skipped += 1
 os.close(fd)
@@ -147,16 +160,23 @@ n = len(pat)
 cap = $maxResults
 found = 0
 skipped = 0
+chunk = 4 * 1024 * 1024  # 4 MB
 for start, size in [$regionList]:
     if found >= cap: break
     try:
-        os.lseek(fd, start, os.SEEK_SET)
-        data = os.read(fd, size)
-        for i in range(len(data) - n + 1):
-            if found >= cap: break
-            if all(pat[j] == wc or data[i + j] == pat[j] for j in range(n)):
-                print(start + i)
-                found += 1
+        off = 0
+        while off < size and found < cap:
+            rsize = min(chunk, size - off)
+            os.lseek(fd, start + off, os.SEEK_SET)
+            data = os.read(fd, rsize)
+            if not data: break
+            dlen = len(data)
+            for i in range(dlen - n + 1):
+                if found >= cap: break
+                if all(pat[j] == wc or data[i + j] == pat[j] for j in range(n)):
+                    print(start + off + i)
+                    found += 1
+            off += max(1, rsize - n + 1)
     except Exception:
         skipped += 1
 os.close(fd)
@@ -174,16 +194,20 @@ print('# capped:' + ('1' if found >= cap else '0'))
     }
 
     /**
-     * Read multiple address ranges in a single Python process.
-     * Returns a list aligned with [requests] — nulls for failed reads.
+     * Read multiple address ranges. Returns a list aligned with [requests] — nulls for failed reads.
+     * Batches requests to avoid oversized Python scripts.
      */
     suspend fun readBytesBatch(
         pid: Int,
         requests: List<Pair<Long, Int>>
     ): List<ByteArray?> = withContext(Dispatchers.IO) {
         if (requests.isEmpty()) return@withContext emptyList()
-        val reqList = requests.joinToString(",") { "(${it.first},${it.second})" }
-        val scriptBody = """
+        val out = arrayOfNulls<ByteArray>(requests.size)
+        // Batch to keep script size under ~1 MB (~50K requests per batch)
+        val batchSize = 50_000
+        for ((batchIndex, batch) in requests.chunked(batchSize).withIndex()) {
+            val reqList = batch.joinToString(",") { "(${it.first},${it.second})" }
+            val scriptBody = """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 for idx, (addr, n) in enumerate([$reqList]):
@@ -198,22 +222,23 @@ for idx, (addr, n) in enumerate([$reqList]):
         print(str(idx) + ':')
 os.close(fd)
 """.trimIndent()
-        val res = runPythonScript(scriptBody, tag = "readb_$pid")
-        val out = arrayOfNulls<ByteArray>(requests.size)
-        for (line in res.stdout) {
-            val parts = line.split(":", limit = 2)
-            if (parts.size != 2) continue
-            val idx = parts[0].toIntOrNull() ?: continue
-            if (idx !in out.indices) continue
-            val hex = parts[1]
-            if (hex.isNotEmpty()) out[idx] = hexToBytes(hex)
+            val res = runPythonScript(scriptBody, tag = "readb_${pid}_${batchIndex}")
+            for (line in res.stdout) {
+                val parts = line.split(":", limit = 2)
+                if (parts.size != 2) continue
+                val localIdx = parts[0].toIntOrNull() ?: continue
+                val globalIdx = batchIndex * batchSize + localIdx
+                if (globalIdx !in out.indices) continue
+                val hex = parts[1]
+                if (hex.isNotEmpty()) out[globalIdx] = hexToBytes(hex)
+            }
         }
         out.toList()
     }
 
     /**
      * Refined scan: keep addresses where bytes still match [pattern] (with optional [wildcard]).
-     * Single Python process for the entire batch.
+     * Batches addresses to avoid oversized Python scripts.
      */
     suspend fun refinedScanBatch(
         pid: Int,
@@ -224,9 +249,13 @@ os.close(fd)
         if (addresses.isEmpty()) return@withContext emptyList()
         val patHex = pattern.joinToString("") { "%02x".format(it) }
         val wildcardHex = wildcard?.let { "%02x".format(it) } ?: ""
-        val addrList = addresses.joinToString(",")
-        val scriptBody = if (wildcard == null) {
-            """
+        val allResults = mutableListOf<Pair<Long, ByteArray>>()
+        // Batch addresses to keep script size under ~1 MB (~50K addresses per batch)
+        val batchSize = 50_000
+        for (batch in addresses.chunked(batchSize)) {
+            val addrList = batch.joinToString(",")
+            val scriptBody = if (wildcard == null) {
+                """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 pat = bytes.fromhex('$patHex')
@@ -235,14 +264,14 @@ for addr in [$addrList]:
     try:
         os.lseek(fd, addr, os.SEEK_SET)
         d = os.read(fd, n)
-        if d == pat:
+        if len(d) == n and d == pat:
             print(str(addr) + ':' + d.hex())
     except Exception:
         pass
 os.close(fd)
 """.trimIndent()
-        } else {
-            """
+            } else {
+                """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 pat = bytes.fromhex('$patHex')
@@ -258,20 +287,23 @@ for addr in [$addrList]:
         pass
 os.close(fd)
 """.trimIndent()
+            }
+            val res = runPythonScript(scriptBody, tag = "refine_$pid")
+            res.stdout.mapNotNull { line ->
+                val parts = line.split(":", limit = 2)
+                if (parts.size != 2) return@mapNotNull null
+                val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
+                val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
+                addr to bytes
+            }.also { allResults.addAll(it) }
         }
-        val res = runPythonScript(scriptBody, tag = "refine_$pid")
-        res.stdout.mapNotNull { line ->
-            val parts = line.split(":", limit = 2)
-            if (parts.size != 2) return@mapNotNull null
-            val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
-            val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
-            addr to bytes
-        }
+        allResults
     }
 
     /**
      * Comparison batch: typed comparisons against previously-known bytes.
      * [tcode] = u1/u2/u4/u8/i1/i2/i4/i8/f4/f8/raw. Operands are decimal strings.
+     * Batches items to avoid oversized Python scripts.
      */
     suspend fun compareBatch(
         pid: Int,
@@ -290,16 +322,29 @@ os.close(fd)
             "f4" -> "<f"; "f8" -> "<d"
             else -> ""
         }
-        val itemsList = items.joinToString(",") { "(${it.first},'${it.second.joinToString("") { b -> "%02x".format(b) }}',${it.third})" }
-        val op1 = operand1 ?: "None"
-        val op2 = operand2 ?: "None"
-        val scriptBody = """
+        // Cast operand strings to proper Python types so int==float mismatches don't occur
+        val op1Py = when {
+            operand1 == null -> "None"
+            fmt in listOf("<f", "<d") -> "float($operand1)"
+            else -> "int($operand1)"
+        }
+        val op2Py = when {
+            operand2 == null -> "None"
+            fmt in listOf("<f", "<d") -> "float($operand2)"
+            else -> "int($operand2)"
+        }
+        val allResults = mutableListOf<Pair<Long, ByteArray>>()
+        // Batch items to keep script size under ~1 MB (~20K items per batch, each ~50 chars)
+        val batchSize = 20_000
+        for (batch in items.chunked(batchSize)) {
+            val itemsList = batch.joinToString(",") { "(${it.first},'${it.second.joinToString("") { b -> "%02x".format(b) }}',${it.third})" }
+            val scriptBody = """
 import os, struct
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 fmt = '$fmt'
 op = '$op'
-op1 = $op1
-op2 = $op2
+op1 = $op1Py
+op2 = $op2Py
 eps = 1e-4
 for addr, prev_hex, n in [$itemsList]:
     try:
@@ -343,14 +388,16 @@ for addr, prev_hex, n in [$itemsList]:
         pass
 os.close(fd)
 """.trimIndent()
-        val res = runPythonScript(scriptBody, tag = "cmp_$pid")
-        res.stdout.mapNotNull { line ->
-            val parts = line.split(":", limit = 2)
-            if (parts.size != 2) return@mapNotNull null
-            val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
-            val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
-            addr to bytes
+            val res = runPythonScript(scriptBody, tag = "cmp_$pid")
+            res.stdout.mapNotNull { line ->
+                val parts = line.split(":", limit = 2)
+                if (parts.size != 2) return@mapNotNull null
+                val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
+                val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
+                addr to bytes
+            }.also { allResults.addAll(it) }
         }
+        allResults
     }
 
     /**
@@ -374,17 +421,23 @@ step = $step
 cap = $maxResults
 found = 0
 skipped = 0
+chunk = 4 * 1024 * 1024  # 4 MB
 for start, size in [$regionList]:
     if found >= cap: break
     try:
-        os.lseek(fd, start, os.SEEK_SET)
-        data = os.read(fd, size)
-        last = len(data) - n
-        i = 0
-        while i <= last and found < cap:
-            print(str(start + i) + ':' + data[i:i+n].hex())
-            found += 1
-            i += step
+        off = 0
+        while off < size and found < cap:
+            rsize = min(chunk, size - off)
+            os.lseek(fd, start + off, os.SEEK_SET)
+            data = os.read(fd, rsize)
+            if not data: break
+            last = len(data) - n
+            i = 0
+            while i <= last and found < cap:
+                print(str(start + off + i) + ':' + data[i:i+n].hex())
+                found += 1
+                i += step
+            off += max(1, rsize - n + 1)
     except Exception:
         skipped += 1
 os.close(fd)

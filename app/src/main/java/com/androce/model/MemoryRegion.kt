@@ -6,7 +6,7 @@ data class MemoryRegion(
     val permissions: String,
     val name: String
 ) {
-    val size: Long get() = endAddress - startAddress
+    val size: Long get() = maxOf(0L, endAddress - startAddress)
     val isReadable: Boolean get() = permissions.length >= 1 && permissions[0] == 'r'
     val isUserMemory: Boolean get() {
         val n = name.trim()

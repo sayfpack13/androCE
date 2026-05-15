@@ -60,6 +60,7 @@ object ValueEncoder {
                 val v = input.trim().toLong() xor xorKey
                 Pair(longToBytes(v), null)
             }
+            ValueType.ALL -> Pair(ByteArray(0), null)
         }
     }
 
@@ -85,6 +86,7 @@ object ValueEncoder {
                 }
                 ValueType.XOR4 -> intToBytes(input.trim().toInt() xor xorKey.toInt())
                 ValueType.XOR8 -> longToBytes(input.trim().toLong() xor xorKey)
+                ValueType.ALL -> ByteArray(0)
             }
         } catch (e: Exception) {
             null

@@ -78,7 +78,11 @@ fun ProcessListScreen(
     val query by viewModel.searchQuery.collectAsState()
     val isLoading = state is ProcessListState.Loading
 
-    LaunchedEffect(Unit) { viewModel.loadProcesses() }
+    // Load processes only if not already loaded
+    val currentState = state
+    if (currentState is ProcessListState.Idle || (currentState is ProcessListState.Success && currentState.processes.isEmpty())) {
+        LaunchedEffect(Unit) { viewModel.loadProcesses() }
+    }
 
     Scaffold(
         topBar = {
@@ -275,17 +279,7 @@ private fun ErrorView(message: String) {
 
 @Composable
 private fun AnimatedProcessRow(process: ProcessInfo, index: Int, onClick: () -> Unit) {
-    var visible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        delay(index.coerceAtMost(20) * 30L)
-        visible = true
-    }
-    AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(tween(200)) + slideInVertically(tween(200)) { it / 2 }
-    ) {
-        ProcessRow(process = process, onClick = onClick)
-    }
+    ProcessRow(process = process, onClick = onClick)
 }
 
 @Composable

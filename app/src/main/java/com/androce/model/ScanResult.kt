@@ -22,6 +22,7 @@ data class ScanResult(
         ValueType.BYTE_ARRAY -> currentBytes.joinToString(" ") { "%02X".format(it) }
         ValueType.XOR4 -> bytesToInt(currentBytes).toString()
         ValueType.XOR8 -> bytesToLong(currentBytes).toString()
+        ValueType.ALL -> "ALL"
     }
 
     override fun equals(other: Any?): Boolean {
