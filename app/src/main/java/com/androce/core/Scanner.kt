@@ -49,6 +49,7 @@ object Scanner {
 
         val chunks = filtered.chunked(REGION_CHUNK)
         var done = 0
+        var lastProgressTime = 0L
         for (chunk in chunks) {
             ensureActive()
             while (paused) { delay(100); ensureActive() }
@@ -59,7 +60,11 @@ object Scanner {
             totalSkipped += outcome.skipped
             if (outcome.capped) capped = true
             done += chunk.size
-            onProgress?.invoke(ScanProgress(done, filtered.size, allAddrs.size, capped, totalSkipped))
+            val now = System.currentTimeMillis()
+            if (now - lastProgressTime > 100 || done == filtered.size) {
+                onProgress?.invoke(ScanProgress(done, filtered.size, allAddrs.size, capped, totalSkipped))
+                lastProgressTime = now
+            }
         }
 
         // Read current bytes for all matched addresses in a single batch

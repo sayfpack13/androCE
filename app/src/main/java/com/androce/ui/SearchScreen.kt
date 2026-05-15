@@ -22,8 +22,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -60,13 +58,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -77,6 +74,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import com.androce.core.MemoryReader
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -118,9 +116,7 @@ fun SearchScreen(
     var xorKey by remember { mutableStateOf(viewModel.xorKey.toString()) }
     var rangeMin by remember { mutableStateOf(viewModel.rangeMin) }
     var rangeMax by remember { mutableStateOf(viewModel.rangeMax) }
-
-    val isScanning = scanState is ScanState.Scanning
-    val pagerState = rememberPagerState(pageCount = { 2 })
+    var selectedTab by remember { mutableStateOf(0) }
 
     // Auto-navigate to results when scan completes
     LaunchedEffect(scanState) {
@@ -130,8 +126,8 @@ fun SearchScreen(
     }
 
     // When scan starts, jump to Scan tab
-    LaunchedEffect(isScanning) {
-        if (isScanning) scope.launch { pagerState.animateScrollToPage(1) }
+    LaunchedEffect(scanState is ScanState.Scanning) {
+        if (scanState is ScanState.Scanning) selectedTab = 1
     }
 
     fun triggerScan() {
@@ -170,22 +166,22 @@ fun SearchScreen(
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
                 )
                 TabRow(
-                    selectedTabIndex = pagerState.currentPage,
+                    selectedTabIndex = selectedTab,
                     containerColor = MaterialTheme.colorScheme.surface,
                     contentColor = Primary,
                     indicator = { tabPositions ->
                         SecondaryIndicator(
-                            Modifier.tabIndicatorOffset(tabPositions[pagerState.currentPage]),
-                            color = Primary
+                            modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
+                            color = Accent
                         )
                     },
                     divider = {}
                 ) {
                     tabs.forEachIndexed { index, (icon, label) ->
-                        val selected = pagerState.currentPage == index
+                        val selected = selectedTab == index
                         Tab(
                             selected = selected,
-                            onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
+                            onClick = { selectedTab = index },
                             selectedContentColor = Primary,
                             unselectedContentColor = OnSurface.copy(alpha = 0.5f)
                         ) {
@@ -214,11 +210,8 @@ fun SearchScreen(
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.fillMaxSize().padding(padding)
-        ) { page ->
-            when (page) {
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            when (selectedTab) {
                 0 -> ConfigureTab(
                     selectedType = selectedType,
                     searchInput = searchInput,
@@ -235,14 +228,14 @@ fun SearchScreen(
                     onSearchChange = { searchInput = it; viewModel.searchInput = it },
                     onXorChange = { xorKey = it; viewModel.xorKey = it.toLongOrNull() ?: 0L },
                     onScanReady = {
-                        scope.launch { pagerState.animateScrollToPage(1) }
+                        selectedTab = 1
                         triggerScan()
                     },
                     onUnknownInitial = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         viewModel.selectedValueType = selectedType
                         viewModel.unknownInitialScan()
-                        scope.launch { pagerState.animateScrollToPage(1) }
+                        selectedTab = 1
                     }
                 )
                 1 -> ScanTab(
@@ -253,7 +246,7 @@ fun SearchScreen(
                     searchInput = searchInput,
                     rangeMin = rangeMin,
                     rangeMax = rangeMax,
-                    isScanning = isScanning,
+                    isScanning = scanState is ScanState.Scanning,
                     isPaused = isPaused,
                     onRangeMinChange = { rangeMin = it; viewModel.rangeMin = it },
                     onRangeMaxChange = { rangeMax = it; viewModel.rangeMax = it },
@@ -276,7 +269,7 @@ fun SearchScreen(
                     onPauseResume = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.togglePause() },
                     onReset = { viewModel.resetScan() },
                     onViewResults = onViewResults,
-                    onGoToConfigure = { scope.launch { pagerState.animateScrollToPage(0) } }
+                    onGoToConfigure = { selectedTab = 0 }
                 )
             }
         }
@@ -388,17 +381,16 @@ private fun RegionScopeChips(selected: RegionFilter, onSelect: (RegionFilter) ->
     val options = listOf(RegionFilter.HEAP_STACK_ANON, RegionFilter.ALL)
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         items(options.size) { i ->
-            val opt = options[i]
-            val isSel = selected::class == opt::class
+            val isSel = selected::class == options[i]::class
             val color = if (isSel) Primary else OnSurface.copy(alpha = 0.5f)
             Box(
                 Modifier.clip(RoundedCornerShape(20.dp))
                     .background(if (isSel) Primary.copy(alpha = 0.15f) else SurfaceVariant)
                     .border(1.dp, color.copy(alpha = if (isSel) 0.8f else 0.2f), RoundedCornerShape(20.dp))
-                    .clickable { onSelect(opt) }
+                    .clickable { onSelect(options[i]) }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
-                Text(opt.label, color = color, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
+                Text(options[i].label, color = color, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
             }
         }
     }
@@ -411,10 +403,17 @@ private fun ScanTab(
     regions: List<com.androce.model.MemoryRegion>,
     selectedType: ValueType,
     searchInput: String,
+    rangeMin: String,
+    rangeMax: String,
     isScanning: Boolean,
+    isPaused: Boolean,
+    onRangeMinChange: (String) -> Unit,
+    onRangeMaxChange: (String) -> Unit,
     onFirstScan: () -> Unit,
     onRefinedScan: () -> Unit,
+    onComparison: (ScanComparison) -> Unit,
     onStop: () -> Unit,
+    onPauseResume: () -> Unit,
     onReset: () -> Unit,
     onViewResults: () -> Unit,
     onGoToConfigure: () -> Unit
@@ -452,13 +451,25 @@ private fun ScanTab(
                         }
                     }
                 }
-                AnimatedContent(targetState = regions.size, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) }, label = "rcount") { count ->
+                AnimatedContent(targetState = regions.size, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) }, label = "region_count") { count ->
                     Column(horizontalAlignment = Alignment.End) {
                         Text(if (count == 0) "…" else "$count", color = Accent, fontSize = 18.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
                         Text("regions", color = OnSurface.copy(alpha = 0.5f), fontSize = 10.sp)
                     }
                 }
             }
+        }
+
+        // Comparison control row (only when we have previous results)
+        if (results.isNotEmpty() && !isScanning) {
+            ComparisonControlRow(
+                selectedType = selectedType,
+                rangeMin = rangeMin,
+                rangeMax = rangeMax,
+                onRangeMinChange = onRangeMinChange,
+                onRangeMaxChange = onRangeMaxChange,
+                onComparison = onComparison
+            )
         }
 
         // Scan action buttons
@@ -468,14 +479,25 @@ private fun ScanTab(
             label = "scan_buttons"
         ) { scanning ->
             if (scanning) {
-                Button(
-                    onClick = onStop,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Stop Scanning")
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = onPauseResume,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = if (isPaused) Accent else Primary)
+                    ) {
+                        Icon(if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (isPaused) "Resume" else "Pause")
+                    }
+                    Button(
+                        onClick = onStop,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Stop")
+                    }
                 }
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -557,7 +579,6 @@ private fun ValueTypeGrid(selected: ValueType, onSelect: (ValueType) -> Unit) {
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ValueTypeCategory.entries.forEach { category ->
-            val types = grouped[category] ?: return@forEach
             val categoryColor = when (category) {
                 ValueTypeCategory.INTEGER -> Primary
                 ValueTypeCategory.FLOAT   -> Accent
@@ -570,17 +591,9 @@ private fun ValueTypeGrid(selected: ValueType, onSelect: (ValueType) -> Unit) {
                 modifier = Modifier.padding(bottom = 2.dp)
             ) {
                 Box(Modifier.size(3.dp, 14.dp).clip(RoundedCornerShape(2.dp)).background(categoryColor))
-                Text(
-                    category.label.uppercase(),
-                    color = categoryColor,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.2.sp
-                )
+                Text(text = category.name.lowercase(), color = Primary, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
             }
-            // 2-column grid
-            val rows = types.chunked(2)
-            rows.forEach { rowTypes ->
+            (grouped[category] ?: emptyList()).chunked(2).forEach { rowTypes ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     rowTypes.forEach { type ->
                         ValueTypeCard(
@@ -659,9 +672,96 @@ private fun ValueTypeCard(
 }
 
 @Composable
+private fun ComparisonControlRow(
+    selectedType: ValueType,
+    rangeMin: String,
+    rangeMax: String,
+    onRangeMinChange: (String) -> Unit,
+    onRangeMaxChange: (String) -> Unit,
+    onComparison: (ScanComparison) -> Unit
+) {
+    var selectedOp by remember { mutableStateOf<ScanComparison?>(null) }
+    val haptic = LocalHapticFeedback.current
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SectionLabel("Compare against previous")
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(ScanComparison.withoutValue.size) { i ->
+                val isSel = selectedOp == ScanComparison.withoutValue[i]
+                Box(
+                    Modifier.clip(RoundedCornerShape(18.dp))
+                        .background(if (isSel) Primary.copy(alpha = 0.2f) else SurfaceVariant)
+                        .border(1.dp, if (isSel) Primary else SurfaceHigh, RoundedCornerShape(18.dp))
+                        .clickable {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            selectedOp = ScanComparison.withoutValue[i]
+                            onComparison(ScanComparison.withoutValue[i])
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(ScanComparison.withoutValue[i].symbol, color = if (isSel) Primary else OnSurface, fontSize = 13.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
+                }
+            }
+        }
+        // Value-require ops: EXACT, INCREASED_BY, DECREASED_BY, BETWEEN
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            val valueOps = ScanComparison.entries.filter { it !in ScanComparison.withoutValue }
+            items(valueOps.size) { i ->
+                val isSel = selectedOp == valueOps[i]
+                Box(
+                    Modifier.clip(RoundedCornerShape(18.dp))
+                        .background(if (isSel) Accent.copy(alpha = 0.2f) else SurfaceVariant)
+                        .border(1.dp, if (isSel) Accent else SurfaceHigh, RoundedCornerShape(18.dp))
+                        .clickable {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            selectedOp = valueOps[i]
+                            if (valueOps[i] != ScanComparison.BETWEEN) {
+                                onComparison(valueOps[i])
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(valueOps[i].label, color = if (isSel) Accent else OnSurface, fontSize = 11.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
+                }
+            }
+        }
+        // Range inputs for BETWEEN
+        if (selectedOp == ScanComparison.BETWEEN) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = rangeMin,
+                    onValueChange = onRangeMinChange,
+                    label = { Text("Min") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    colors = inputColors(),
+                    keyboardOptions = KeyboardOptions(keyboardType = keyboardTypeFor(selectedType))
+                )
+                OutlinedTextField(
+                    value = rangeMax,
+                    onValueChange = onRangeMaxChange,
+                    label = { Text("Max") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    colors = inputColors(),
+                    keyboardOptions = KeyboardOptions(keyboardType = keyboardTypeFor(selectedType))
+                )
+            }
+            Button(
+                onClick = { onComparison(ScanComparison.BETWEEN) },
+                enabled = rangeMin.isNotBlank() && rangeMax.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Accent)
+            ) {
+                Text("Run Range Scan", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
 private fun ScanProgressCard(progress: ScanProgress) {
-    val fraction = if (progress.totalRegions > 0) progress.scannedRegions.toFloat() / progress.totalRegions else 0f
-    val animFraction by animateFloatAsState(fraction, tween(300), label = "progress")
+    val animFraction by animateFloatAsState(if (progress.totalRegions > 0) progress.scannedRegions.toFloat() / progress.totalRegions else 0f, tween(300), label = "progress")
     val percent = (animFraction * 100).toInt()
 
     Column(
@@ -677,7 +777,15 @@ private fun ScanProgressCard(progress: ScanProgress) {
             Text("$percent%", color = Primary, fontSize = 13.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
         }
         LinearProgressIndicator(progress = { animFraction }, modifier = Modifier.fillMaxWidth(), color = Primary, trackColor = SurfaceHigh)
-        Text("Found so far: ${progress.foundCount}", color = AccentGreen, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+            Text("Found so far: ${progress.foundCount}", color = AccentGreen, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            if (progress.capped) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = Warning, modifier = Modifier.size(12.dp))
+                    Text("Capped at ${MemoryReader.MAX_RESULTS}", color = Warning, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
     }
 }
 
@@ -710,8 +818,8 @@ private fun searchHint(type: ValueType): String = when (type) {
     ValueType.STRING_UTF8 -> "UTF-8 string"
     ValueType.STRING_UTF16 -> "UTF-16 string"
     ValueType.BYTE_ARRAY -> "Hex bytes e.g. FF 4A ?? 00"
-    ValueType.XOR4 -> "Int (XOR'd with key)"
-    ValueType.XOR8 -> "Long (XOR'd with key)"
+    ValueType.XOR4 -> "Int (XOR with key)"
+    ValueType.XOR8 -> "Long (XOR with key)"
 }
 
 private fun keyboardTypeFor(type: ValueType): KeyboardType = when (type) {

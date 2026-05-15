@@ -17,8 +17,8 @@ enum class ValueType(val label: String, val byteSize: Int, val category: ValueTy
     STRING_UTF8("UTF-8",   -1, ValueTypeCategory.TEXT, "ASCII / UTF-8 string"),
     STRING_UTF16("UTF-16", -1, ValueTypeCategory.TEXT, "Unicode wide string"),
     BYTE_ARRAY("Byte Array", -1, ValueTypeCategory.SPECIAL, "Hex bytes with ?? wildcards"),
-    XOR4("XOR Int",  4,  ValueTypeCategory.SPECIAL, "Int XOR'd with key"),
-    XOR8("XOR Long", 8,  ValueTypeCategory.SPECIAL, "Long XOR'd with key");
+    XOR4("XOR Int",  4,  ValueTypeCategory.SPECIAL, "Int XOR with key"),
+    XOR8("XOR Long", 8,  ValueTypeCategory.SPECIAL, "Long XOR with key");
 
     val isVariableLength get() = byteSize == -1
 }

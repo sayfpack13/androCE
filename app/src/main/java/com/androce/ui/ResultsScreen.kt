@@ -9,7 +9,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
@@ -23,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,6 +39,9 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -51,15 +54,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -100,16 +102,21 @@ fun ResultsScreen(
     val results by viewModel.results.collectAsState()
     val selectedCount = results.count { it.selected }
     val allSelected = results.isNotEmpty() && results.all { it.selected }
-    val snackbarHostState = remember { SnackbarHostState() }
+    val snackBarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val haptic = LocalHapticFeedback.current
 
     var showBulkWriteDialog by rememberSaveable { mutableStateOf(false) }
     var bulkWriteValue by rememberSaveable { mutableStateOf("") }
+    var showMenu by remember { mutableStateOf(false) }
+    var showSaveDialog by rememberSaveable { mutableStateOf(false) }
+    var saveName by rememberSaveable { mutableStateOf("") }
+    var showLoadDialog by rememberSaveable { mutableStateOf(false) }
+    var tableNames by remember { mutableStateOf(viewModel.listSavedTables()) }
 
     Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = { SnackbarHost(snackBarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -138,6 +145,34 @@ fun ResultsScreen(
                     }
                     IconButton(onClick = { viewModel.selectAll(!allSelected) }) {
                         Icon(Icons.Default.SelectAll, contentDescription = "Select all", tint = Primary)
+                    }
+                    Box {
+                        IconButton(onClick = { showMenu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Menu", tint = Primary)
+                        }
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Save Table") },
+                                leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    saveName = ""
+                                    showSaveDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Load Table") },
+                                leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    tableNames = viewModel.listSavedTables()
+                                    showLoadDialog = true
+                                }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -180,17 +215,17 @@ fun ResultsScreen(
                 verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 items(results, key = { it.address }) { result ->
-                    SwipeToDismissResultRow(
+                    ResultRow(
                         result = result,
                         onToggleSelect = { viewModel.toggleSelected(result.address) },
                         onToggleFreeze = { viewModel.toggleFreeze(result) },
                         onWrite = { newVal -> viewModel.writeAddress(result.address, newVal) },
-                        onDismiss = { viewModel.removeResult(result.address) },
                         onCopyAddress = {
                             clipboard.setText(AnnotatedString(result.addressHex))
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            scope.launch { snackbarHostState.showSnackbar("Address copied: ${result.addressHex}") }
-                        }
+                            scope.launch { snackBarHostState.showSnackbar("Address copied: ${result.addressHex}") }
+                        },
+                        onDelete = { viewModel.removeResult(result.address) }
                     )
                 }
             }
@@ -225,8 +260,8 @@ fun ResultsScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val addrs = results.filter { it.selected }.map { it.address }
-                    viewModel.writeBulk(addrs, bulkWriteValue)
+                    val addresses = results.filter { it.selected }.map { it.address }
+                    viewModel.writeBulk(addresses, bulkWriteValue)
                     showBulkWriteDialog = false
                     bulkWriteValue = ""
                 }) { Text("Write", color = Primary) }
@@ -238,58 +273,99 @@ fun ResultsScreen(
             }
         )
     }
-}
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
-@Composable
-private fun SwipeToDismissResultRow(
-    result: ScanResult,
-    onToggleSelect: () -> Unit,
-    onToggleFreeze: () -> Unit,
-    onWrite: (String) -> Unit,
-    onDismiss: () -> Unit,
-    onCopyAddress: () -> Unit
-) {
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { it == SwipeToDismissBoxValue.EndToStart }
-    )
-
-    LaunchedEffect(dismissState.currentValue) {
-        if (dismissState.currentValue == SwipeToDismissBoxValue.EndToStart) {
-            onDismiss()
-        }
+    if (showSaveDialog) {
+        AlertDialog(
+            onDismissRequest = { showSaveDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = {
+                Text(
+                    "Save Cheat Table",
+                    color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = saveName,
+                        onValueChange = { saveName = it },
+                        label = { Text("Table name") },
+                        singleLine = true,
+                        colors = inputColors()
+                    )
+                    Text(
+                        "Saving ${results.size} address${if (results.size != 1) "es" else ""}",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (saveName.isNotBlank()) {
+                        if (viewModel.saveCheatTable(saveName)) {
+                            scope.launch { snackBarHostState.showSnackbar("Table saved") }
+                        } else {
+                            scope.launch { snackBarHostState.showSnackbar("Failed to save table") }
+                        }
+                        showSaveDialog = false
+                    }
+                }) { Text("Save", color = Primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSaveDialog = false }) {
+                    Text("Cancel", color = MaterialTheme.colorScheme.onSurface)
+                }
+            }
+        )
     }
 
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = false,
-        backgroundContent = {
-            Box(
-                Modifier.fillMaxSize().clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.error),
-                contentAlignment = Alignment.CenterEnd
-            ) {
-                Icon(Icons.Default.Delete, contentDescription = "Remove", tint = Color.White, modifier = Modifier.padding(end = 20.dp))
-            }
-        }
-    ) {
-        ResultRow(
-            result = result,
-            onToggleSelect = onToggleSelect,
-            onToggleFreeze = onToggleFreeze,
-            onWrite = onWrite,
-            onCopyAddress = onCopyAddress
+    if (showLoadDialog) {
+        AlertDialog(
+            onDismissRequest = { showLoadDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = {
+                Text(
+                    "Load Cheat Table",
+                    color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                if (tableNames.isEmpty()) {
+                    Text("No saved tables", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        items(tableNames.size) { i ->
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(SurfaceVariant)
+                                    .clickable {
+                                        scope.launch { snackBarHostState.showSnackbar("Loaded ${viewModel.loadCheatTable(tableNames[i])} addresses") }
+                                        showLoadDialog = false
+                                    }
+                                    .padding(12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(tableNames[i], color = MaterialTheme.colorScheme.onBackground)
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Accent, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showLoadDialog = false }) { Text("Close", color = Primary) } }
         )
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ResultRow(
     result: ScanResult,
     onToggleSelect: () -> Unit,
     onToggleFreeze: () -> Unit,
     onWrite: (String) -> Unit,
-    onCopyAddress: () -> Unit
+    onCopyAddress: () -> Unit,
+    onDelete: () -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
     var isEditing by remember { mutableStateOf(false) }
@@ -324,10 +400,7 @@ private fun ResultRow(
                 fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.combinedClickable(
-                    onClick = {},
-                    onLongClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onCopyAddress() }
-                )
+                modifier = Modifier.clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onCopyAddress() }
             )
             if (isEditing) {
                 OutlinedTextField(
@@ -362,6 +435,18 @@ private fun ResultRow(
                 imageVector = if (isEditing) Icons.Default.Check else Icons.Default.Edit,
                 contentDescription = "Edit",
                 tint = if (isEditing) AccentGreen else Primary,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        IconButton(
+            onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onDelete() },
+            modifier = Modifier.size(36.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "Delete",
+                tint = MaterialTheme.colorScheme.error,
                 modifier = Modifier.size(18.dp)
             )
         }

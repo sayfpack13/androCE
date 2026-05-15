@@ -27,7 +27,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 sealed class ScanState {
@@ -108,11 +110,12 @@ class ScanViewModel : ViewModel() {
 
     fun loadRegions() {
         val pid = selectedProcess?.pid ?: return
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
-                _regions.value = MemoryReader.getReadableRegions(pid)
+                val regions = MemoryReader.getReadableRegions(pid)
+                withContext(Dispatchers.Main) { _regions.value = regions }
             } catch (_: Exception) {
-                _regions.value = emptyList()
+                withContext(Dispatchers.Main) { _regions.value = emptyList() }
             }
         }
     }
@@ -134,17 +137,29 @@ class ScanViewModel : ViewModel() {
         scanJob?.cancel()
         Scanner.paused = false
         _isPaused.value = false
-        scanJob = viewModelScope.launch(Dispatchers.Main) {
-            _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
-            delay(32)
+        scanJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val found = Scanner.firstScan(
                     pid, selectedValueType, pattern, wildcard, _regions.value, _regionFilter.value
-                ) { p -> _scanState.value = ScanState.Scanning(p) }
-                _results.value = found
-                _scanState.value = ScanState.Done(found)
+                ) { p ->
+                    if (isActive) {
+                        viewModelScope.launch(Dispatchers.Main) {
+                            _scanState.value = ScanState.Scanning(p)
+                        }
+                    }
+                }
+                if (isActive) {
+                    withContext(Dispatchers.Main) {
+                        _results.value = found
+                        _scanState.value = ScanState.Done(found)
+                    }
+                }
             } catch (e: Exception) {
-                _scanState.value = ScanState.Error(e.message ?: "Scan failed")
+                if (isActive) {
+                    withContext(Dispatchers.Main) {
+                        _scanState.value = ScanState.Error(e.message ?: "Scan failed")
+                    }
+                }
             }
         }
     }
@@ -158,17 +173,29 @@ class ScanViewModel : ViewModel() {
         scanJob?.cancel()
         Scanner.paused = false
         _isPaused.value = false
-        scanJob = viewModelScope.launch(Dispatchers.Main) {
-            _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
-            delay(32)
+        scanJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val found = Scanner.unknownInitialScan(
                     pid, selectedValueType, _regions.value, _regionFilter.value
-                ) { p -> _scanState.value = ScanState.Scanning(p) }
-                _results.value = found
-                _scanState.value = ScanState.Done(found)
+                ) { p ->
+                    if (isActive) {
+                        viewModelScope.launch(Dispatchers.Main) {
+                            _scanState.value = ScanState.Scanning(p)
+                        }
+                    }
+                }
+                if (isActive) {
+                    withContext(Dispatchers.Main) {
+                        _results.value = found
+                        _scanState.value = ScanState.Done(found)
+                    }
+                }
             } catch (e: Exception) {
-                _scanState.value = ScanState.Error(e.message ?: "Snapshot failed")
+                if (isActive) {
+                    withContext(Dispatchers.Main) {
+                        _scanState.value = ScanState.Error(e.message ?: "Snapshot failed")
+                    }
+                }
             }
         }
     }
@@ -183,17 +210,27 @@ class ScanViewModel : ViewModel() {
             _scanState.value = ScanState.Error("Invalid input: ${e.message}"); return
         }
         scanJob?.cancel()
-        scanJob = viewModelScope.launch(Dispatchers.Main) {
-            _scanState.value = ScanState.Scanning(ScanProgress(0, previous.size, 0))
-            delay(32)
+        scanJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val found = Scanner.refinedScan(pid, previous, pattern, wildcard) { p ->
-                    _scanState.value = ScanState.Scanning(p)
+                    if (isActive) {
+                        viewModelScope.launch(Dispatchers.Main) {
+                            _scanState.value = ScanState.Scanning(p)
+                        }
+                    }
                 }
-                _results.value = found
-                _scanState.value = ScanState.Done(found)
+                if (isActive) {
+                    withContext(Dispatchers.Main) {
+                        _results.value = found
+                        _scanState.value = ScanState.Done(found)
+                    }
+                }
             } catch (e: Exception) {
-                _scanState.value = ScanState.Error(e.message ?: "Refined scan failed")
+                if (isActive) {
+                    withContext(Dispatchers.Main) {
+                        _scanState.value = ScanState.Error(e.message ?: "Refined scan failed")
+                    }
+                }
             }
         }
     }
@@ -226,26 +263,38 @@ class ScanViewModel : ViewModel() {
             _scanState.value = ScanState.Error("${op.label} requires a value"); return
         }
         scanJob?.cancel()
-        scanJob = viewModelScope.launch(Dispatchers.Main) {
-            _scanState.value = ScanState.Scanning(ScanProgress(0, previous.size, 0))
-            delay(32)
+        scanJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val found = Scanner.comparisonScan(
                     pid, previous, op, selectedValueType, operand1, operand2
-                ) { p -> _scanState.value = ScanState.Scanning(p) }
-                _results.value = found
-                _scanState.value = ScanState.Done(found)
+                ) { p ->
+                    if (isActive) {
+                        viewModelScope.launch(Dispatchers.Main) {
+                            _scanState.value = ScanState.Scanning(p)
+                        }
+                    }
+                }
+                if (isActive) {
+                    withContext(Dispatchers.Main) {
+                        _results.value = found
+                        _scanState.value = ScanState.Done(found)
+                    }
+                }
             } catch (e: Exception) {
-                _scanState.value = ScanState.Error(e.message ?: "Comparison failed")
+                if (isActive) {
+                    withContext(Dispatchers.Main) {
+                        _scanState.value = ScanState.Error(e.message ?: "Comparison failed")
+                    }
+                }
             }
         }
     }
 
     fun refreshValues() {
         val pid = selectedProcess?.pid ?: return
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val refreshed = Scanner.refreshValues(pid, _results.value)
-            _results.value = refreshed.toList()
+            withContext(Dispatchers.Main) { _results.value = refreshed.toList() }
         }
     }
 
@@ -255,11 +304,13 @@ class ScanViewModel : ViewModel() {
         val pid = selectedProcess?.pid ?: return
         val bytes = ValueEncoder.encodeWriteValue(newValue, selectedValueType, xorKey) ?: return
         val addrSet = addresses.toSet()
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val writes = addresses.map { it to bytes }
             MemoryWriter.writeBytesMany(pid, writes)
-            _results.value = _results.value.map { r ->
-                if (r.address in addrSet) r.copy(currentBytes = bytes.copyOf()) else r
+            withContext(Dispatchers.Main) {
+                _results.value = _results.value.map { r ->
+                    if (r.address in addrSet) r.copy(currentBytes = bytes.copyOf()) else r
+                }
             }
         }
     }
