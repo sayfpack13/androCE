@@ -48,7 +48,6 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
-    implementation(libs.androidx.navigation.compose)
     implementation(libs.libsu.core)
     implementation(libs.libsu.service)
     implementation(libs.kotlinx.coroutines.android)
