@@ -1,14 +1,11 @@
 package com.androce.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -27,11 +24,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -51,7 +48,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -80,6 +76,7 @@ fun ProcessListScreen(
     val state by viewModel.state.collectAsState()
     val filtered by viewModel.filteredProcesses.collectAsState()
     val query by viewModel.searchQuery.collectAsState()
+    val isLoading = state is ProcessListState.Loading
 
     LaunchedEffect(Unit) { viewModel.loadProcesses() }
 
@@ -124,8 +121,10 @@ fun ProcessListScreen(
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Surface),
                 actions = {
-                    IconButton(onClick = { viewModel.loadProcesses() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary)
+                    if (!isLoading) {
+                        IconButton(onClick = { viewModel.loadProcesses() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary)
+                        }
                     }
                 }
             )
@@ -147,6 +146,13 @@ fun ProcessListScreen(
                 leadingIcon = {
                     Icon(Icons.Default.Search, contentDescription = null, tint = Primary, modifier = Modifier.size(20.dp))
                 },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.searchQuery.value = "" }) {
+                            Icon(Icons.Default.Clear, contentDescription = "Clear", tint = OnSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
+                        }
+                    }
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -164,24 +170,45 @@ fun ProcessListScreen(
             )
 
             when (state) {
-                is ProcessListState.Loading -> LoadingView()
                 is ProcessListState.Error -> ErrorView((state as ProcessListState.Error).message)
                 else -> {
-                    AnimatedVisibility(
-                        visible = filtered.isNotEmpty(),
-                        enter = fadeIn(tween(300))
+                    PullToRefreshBox(
+                        isRefreshing = isLoading,
+                        onRefresh = { viewModel.loadProcesses() },
+                        modifier = Modifier.fillMaxSize()
                     ) {
-                        LazyColumn(
-                            Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            itemsIndexed(filtered, key = { _, p -> p.pid }) { index, process ->
-                                AnimatedProcessRow(
-                                    process = process,
-                                    index = index,
-                                    onClick = { onProcessSelected(process) }
-                                )
+                        if (isLoading && filtered.isEmpty()) {
+                            LoadingView()
+                        } else if (filtered.isEmpty() && query.isNotBlank()) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Icon(Icons.Default.Search, contentDescription = null, tint = OnSurface.copy(alpha = 0.3f), modifier = Modifier.size(40.dp))
+                                    Text("No matches for \"$query\"", color = OnSurface, fontSize = 14.sp)
+                                }
+                            }
+                        } else {
+                            LazyColumn(
+                                Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                if (filtered.isNotEmpty()) {
+                                    item {
+                                        Text(
+                                            "${filtered.size} app${if (filtered.size != 1) "s" else ""}",
+                                            color = OnSurface,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                itemsIndexed(filtered, key = { _, p -> p.pid }) { index, process ->
+                                    AnimatedProcessRow(
+                                        process = process,
+                                        index = index,
+                                        onClick = { onProcessSelected(process) }
+                                    )
+                                }
                             }
                         }
                     }
@@ -193,28 +220,35 @@ fun ProcessListScreen(
 
 @Composable
 private fun LoadingView() {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val scale by infiniteTransition.animateFloat(
-        initialValue = 0.9f, targetValue = 1.1f,
-        animationSpec = infiniteRepeatable(tween(800, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "scale"
-    )
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(20.dp)
+        ) {
             Box(contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(
                     color = Primary,
-                    modifier = Modifier.size(56.dp),
+                    modifier = Modifier.size(64.dp),
                     strokeWidth = 3.dp
+                )
+                CircularProgressIndicator(
+                    color = Accent.copy(alpha = 0.4f),
+                    modifier = Modifier.size(48.dp),
+                    strokeWidth = 2.dp
                 )
                 Icon(
                     Icons.Default.Memory,
                     contentDescription = null,
                     tint = Accent,
-                    modifier = Modifier.size(24.dp).scale(scale)
+                    modifier = Modifier.size(22.dp)
                 )
             }
-            Text("Scanning processes…", color = OnSurface, fontSize = 14.sp)
+            Text(
+                "Scanning processes…",
+                color = OnSurface,
+                fontSize = 14.sp,
+                fontFamily = FontFamily.Monospace
+            )
         }
     }
 }

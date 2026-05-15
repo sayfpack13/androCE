@@ -206,6 +206,10 @@ class ScanViewModel : ViewModel() {
         _results.value = updated
     }
 
+    fun removeResult(address: Long) {
+        _results.value = _results.value.filter { it.address != address }
+    }
+
     fun cancelScan() {
         scanJob?.cancel()
         _scanState.value = ScanState.Idle
