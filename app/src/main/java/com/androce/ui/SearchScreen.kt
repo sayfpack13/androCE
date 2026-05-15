@@ -11,7 +11,6 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +18,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -57,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -68,11 +69,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.core.ScanProgress
 import com.androce.model.ValueType
+import com.androce.model.ValueTypeCategory
 import com.androce.ui.theme.Accent
 import com.androce.ui.theme.AccentGreen
+import com.androce.ui.theme.OnBackground
+import com.androce.ui.theme.OnSurface
 import com.androce.ui.theme.Primary
+import com.androce.ui.theme.PrimaryDim
 import com.androce.ui.theme.SurfaceHigh
 import com.androce.ui.theme.SurfaceVariant
+import com.androce.ui.theme.Warning
 import com.androce.viewmodel.ScanState
 import com.androce.viewmodel.ScanViewModel
 
@@ -93,6 +99,12 @@ fun SearchScreen(
     var xorKey by remember { mutableStateOf(viewModel.xorKey.toString()) }
 
     val isScanning = scanState is ScanState.Scanning
+
+    LaunchedEffect(scanState) {
+        if (scanState is ScanState.Done && (scanState as ScanState.Done).results.isNotEmpty()) {
+            onViewResults()
+        }
+    }
 
     fun triggerScan() {
         if (searchInput.isBlank()) return
@@ -135,7 +147,7 @@ fun SearchScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             SectionLabel("Value Type")
-            ValueTypePicker(selected = selectedType) { t ->
+            ValueTypeGrid(selected = selectedType) { t ->
                 selectedType = t
                 viewModel.selectedValueType = t
                 searchInput = ""
@@ -252,12 +264,13 @@ fun SearchScreen(
 
             when (val s = scanState) {
                 is ScanState.Scanning -> ScanProgressCard(s.progress)
+                is ScanState.Done -> ResultsBadge(count = s.results.size, onClick = onViewResults)
                 is ScanState.Error -> Text("Error: ${s.message}", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-                else -> {}
-            }
-
-            if (results.isNotEmpty() && !isScanning) {
-                ResultsBadge(count = results.size, onClick = onViewResults)
+                else -> {
+                    if (results.isNotEmpty()) {
+                        ResultsBadge(count = results.size, onClick = onViewResults)
+                    }
+                }
             }
         }
     }
@@ -269,36 +282,108 @@ private fun SectionLabel(text: String) {
 }
 
 @Composable
-private fun ValueTypePicker(selected: ValueType, onSelect: (ValueType) -> Unit) {
+private fun ValueTypeGrid(selected: ValueType, onSelect: (ValueType) -> Unit) {
     val haptic = LocalHapticFeedback.current
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        ValueType.entries.forEach { type ->
-            val isSelected = type == selected
-            val bgColor by animateColorAsState(
-                if (isSelected) Primary else SurfaceVariant, tween(150), label = "chip_bg"
-            )
+    val grouped = ValueType.entries.groupBy { it.category }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        ValueTypeCategory.entries.forEach { category ->
+            val types = grouped[category] ?: return@forEach
+            val categoryColor = when (category) {
+                ValueTypeCategory.INTEGER -> Primary
+                ValueTypeCategory.FLOAT   -> Accent
+                ValueTypeCategory.TEXT    -> AccentGreen
+                ValueTypeCategory.SPECIAL -> Warning
+            }
             Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(bgColor)
-                    .border(1.dp, if (isSelected) Primary else Color.Transparent, RoundedCornerShape(8.dp))
-                    .clickable { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); onSelect(type) }
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(bottom = 2.dp)
             ) {
-                if (isSelected) {
-                    Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+                Box(Modifier.size(3.dp, 14.dp).clip(RoundedCornerShape(2.dp)).background(categoryColor))
+                Text(
+                    category.label.uppercase(),
+                    color = categoryColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.2.sp
+                )
+            }
+            // 2-column grid
+            val rows = types.chunked(2)
+            rows.forEach { rowTypes ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    rowTypes.forEach { type ->
+                        ValueTypeCard(
+                            type = type,
+                            isSelected = type == selected,
+                            accentColor = categoryColor,
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                onSelect(type)
+                            }
+                        )
+                    }
+                    // fill empty slot if odd number
+                    if (rowTypes.size == 1) Spacer(Modifier.weight(1f))
                 }
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ValueTypeCard(
+    type: ValueType,
+    isSelected: Boolean,
+    accentColor: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val bgColor by animateColorAsState(
+        if (isSelected) accentColor.copy(alpha = 0.18f) else SurfaceVariant,
+        tween(150), label = "card_bg"
+    )
+    val borderColor by animateColorAsState(
+        if (isSelected) accentColor else Color.Transparent,
+        tween(150), label = "card_border"
+    )
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(bgColor)
+            .border(1.5.dp, borderColor, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
                 Text(
                     text = type.label,
-                    color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurface,
-                    fontSize = 12.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    color = if (isSelected) accentColor else OnBackground,
+                    fontSize = 13.sp,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                 )
+                Text(
+                    text = type.description,
+                    color = OnSurface.copy(alpha = if (isSelected) 0.9f else 0.6f),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 13.sp
+                )
+            }
+            if (isSelected) {
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    Modifier.size(18.dp).clip(RoundedCornerShape(9.dp))
+                        .background(Brush.linearGradient(listOf(accentColor, accentColor.copy(alpha = 0.6f)))),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(11.dp))
+                }
             }
         }
     }
