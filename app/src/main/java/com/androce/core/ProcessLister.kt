@@ -10,17 +10,16 @@ object ProcessLister {
     suspend fun listProcesses(): List<ProcessInfo> = withContext(Dispatchers.IO) {
         val results = mutableListOf<ProcessInfo>()
         try {
-            // Single shell script: iterate all numeric /proc dirs and print "pid|name"
+            // Only show user apps: UID >= 10000, has a cmdline (not kernel thread)
             val script = """
                 for d in /proc/[0-9]*; do
                   pid="${'$'}{d##*/}"
-                  name=$(tr -d '\0' < "${'$'}d/cmdline" 2>/dev/null | cut -d' ' -f1)
-                  if [ -z "${'$'}name" ]; then
-                    name=$(cat "${'$'}d/comm" 2>/dev/null)
-                  fi
-                  if [ -n "${'$'}name" ]; then
-                    echo "${'$'}pid|${'$'}name"
-                  fi
+                  cmdline=$(tr -d '\0' < "${'$'}d/cmdline" 2>/dev/null | cut -d' ' -f1)
+                  [ -z "${'$'}cmdline" ] && continue
+                  uid=$(awk '/^Uid:/{print $2}' "${'$'}d/status" 2>/dev/null)
+                  [ -z "${'$'}uid" ] && continue
+                  [ "${'$'}uid" -lt 10000 ] && continue
+                  echo "${'$'}pid|${'$'}cmdline"
                 done
             """.trimIndent()
 
