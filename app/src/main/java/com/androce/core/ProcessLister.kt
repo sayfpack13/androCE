@@ -10,14 +10,28 @@ object ProcessLister {
     suspend fun listProcesses(): List<ProcessInfo> = withContext(Dispatchers.IO) {
         val results = mutableListOf<ProcessInfo>()
         try {
-            val pidListResult = Shell.cmd("ls /proc").exec()
-            val pids = pidListResult.out
-                .flatMap { it.trim().split("\\s+".toRegex()) }
-                .mapNotNull { it.toIntOrNull() }
-                .filter { it > 0 }
+            // Single shell script: iterate all numeric /proc dirs and print "pid|name"
+            val script = """
+                for d in /proc/[0-9]*; do
+                  pid="${'$'}{d##*/}"
+                  name=$(tr -d '\0' < "${'$'}d/cmdline" 2>/dev/null | cut -d' ' -f1)
+                  if [ -z "${'$'}name" ]; then
+                    name=$(cat "${'$'}d/comm" 2>/dev/null)
+                  fi
+                  if [ -n "${'$'}name" ]; then
+                    echo "${'$'}pid|${'$'}name"
+                  fi
+                done
+            """.trimIndent()
 
-            for (pid in pids) {
-                val name = readProcessName(pid) ?: continue
+            val result = Shell.cmd(script).exec()
+            AppLogger.d("ProcessLister", "shell success=${result.isSuccess} lines=${result.out.size}")
+
+            for (line in result.out) {
+                val parts = line.trim().split("|", limit = 2)
+                if (parts.size < 2) continue
+                val pid = parts[0].toIntOrNull() ?: continue
+                val name = parts[1].trim().trimEnd('\u0000')
                 if (name.isBlank()) continue
                 results.add(
                     ProcessInfo(
@@ -27,23 +41,10 @@ object ProcessLister {
                     )
                 )
             }
+            AppLogger.d("ProcessLister", "Processes found: ${results.size}")
         } catch (e: Exception) {
-            e.printStackTrace()
+            AppLogger.e("ProcessLister", "listProcesses failed", e)
         }
         results.sortedBy { it.name }
-    }
-
-    private fun readProcessName(pid: Int): String? {
-        return try {
-            val cmdlineResult = Shell.cmd("cat /proc/$pid/cmdline 2>/dev/null").exec()
-            val cmdline = cmdlineResult.out.joinToString("").trim().trimEnd('\u0000')
-            if (cmdline.isNotEmpty()) cmdline
-            else {
-                val commResult = Shell.cmd("cat /proc/$pid/comm 2>/dev/null").exec()
-                commResult.out.joinToString("").trim()
-            }
-        } catch (e: Exception) {
-            null
-        }
     }
 }
