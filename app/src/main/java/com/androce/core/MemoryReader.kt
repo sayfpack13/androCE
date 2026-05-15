@@ -7,18 +7,21 @@ import kotlinx.coroutines.withContext
 
 object MemoryReader {
 
+    private const val TAG = "MemoryReader"
     private const val CHUNK_SIZE = 4 * 1024 * 1024L // 4 MB
 
     suspend fun getReadableRegions(pid: Int): List<MemoryRegion> = withContext(Dispatchers.IO) {
         val regions = mutableListOf<MemoryRegion>()
         try {
             val result = Shell.cmd("cat /proc/$pid/maps 2>/dev/null").exec()
+            AppLogger.d(TAG, "getReadableRegions pid=$pid shell success=${result.isSuccess} lines=${result.out.size}")
             for (line in result.out) {
                 val region = parseMapsLine(line) ?: continue
                 if (region.isReadable) regions.add(region)
             }
+            AppLogger.d(TAG, "Readable regions found: ${regions.size}")
         } catch (e: Exception) {
-            e.printStackTrace()
+            AppLogger.e(TAG, "getReadableRegions failed", e)
         }
         regions
     }

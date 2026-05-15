@@ -6,6 +6,8 @@ import kotlinx.coroutines.withContext
 
 object MemoryWriter {
 
+    private const val TAG = "MemoryWriter"
+
     /**
      * Write [bytes] to [pid]'s memory at [address].
      * Uses a Python one-liner available on most rooted devices (or falls back to dd).
@@ -14,11 +16,12 @@ object MemoryWriter {
         withContext(Dispatchers.IO) {
             try {
                 val hexData = bytes.joinToString("") { "%02x".format(it) }
-                // Build a Python script that opens /proc/pid/mem and writes
                 val script = buildPythonWriteScript(pid, address, hexData)
                 val result = Shell.cmd(script).exec()
+                AppLogger.d(TAG, "writeBytes pid=$pid addr=0x${address.toString(16)} size=${bytes.size} success=${result.isSuccess} out=${result.out} err=${result.err}")
                 result.isSuccess
             } catch (e: Exception) {
+                AppLogger.e(TAG, "writeBytes failed pid=$pid addr=0x${address.toString(16)}", e)
                 false
             }
         }

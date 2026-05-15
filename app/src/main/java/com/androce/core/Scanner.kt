@@ -15,6 +15,8 @@ data class ScanProgress(
 
 object Scanner {
 
+    private const val TAG = "Scanner"
+
     /**
      * First scan: scan all readable regions for [pattern].
      */
@@ -27,6 +29,7 @@ object Scanner {
         onProgress: ((ScanProgress) -> Unit)? = null
     ): List<ScanResult> = withContext(Dispatchers.IO) {
         val results = mutableListOf<ScanResult>()
+        AppLogger.d(TAG, "firstScan start pid=$pid type=$valueType regions=${regions.size} patternSize=${pattern.size}")
 
         for ((index, region) in regions.withIndex()) {
             ensureActive()
@@ -39,6 +42,7 @@ object Scanner {
                 results.add(ScanResult(addr, valueType, bytes))
             }
         }
+        AppLogger.d(TAG, "firstScan done: found=${results.size}")
         onProgress?.invoke(ScanProgress(regions.size, regions.size, results.size))
         results
     }
