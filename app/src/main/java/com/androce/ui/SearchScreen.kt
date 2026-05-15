@@ -62,7 +62,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -79,7 +78,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.core.ScanProgress
-import com.androce.model.RegionFilter
 import com.androce.model.ScanComparison
 import com.androce.model.ValueType
 import com.androce.model.ValueTypeCategory
@@ -106,10 +104,8 @@ fun SearchScreen(
     val scanState by viewModel.scanState.collectAsState()
     val results by viewModel.results.collectAsState()
     val regions by viewModel.regions.collectAsState()
-    val regionFilter by viewModel.regionFilter.collectAsState()
     val isPaused by viewModel.isPaused.collectAsState()
     val haptic = LocalHapticFeedback.current
-    val scope = rememberCoroutineScope()
 
     var searchInput by remember { mutableStateOf(viewModel.searchInput) }
     var selectedType by remember { mutableStateOf(viewModel.selectedValueType) }
@@ -210,9 +206,7 @@ fun SearchScreen(
                     selectedType = selectedType,
                     searchInput = searchInput,
                     xorKey = xorKey,
-                    regionFilter = regionFilter,
                     resultsEmpty = results.isEmpty(),
-                    onRegionFilterChange = { viewModel.setRegionFilter(it) },
                     onTypeChange = { t ->
                         selectedType = t
                         viewModel.selectedValueType = t
@@ -275,9 +269,7 @@ private fun ConfigureTab(
     selectedType: ValueType,
     searchInput: String,
     xorKey: String,
-    regionFilter: RegionFilter,
     resultsEmpty: Boolean,
-    onRegionFilterChange: (RegionFilter) -> Unit,
     onTypeChange: (ValueType) -> Unit,
     onSearchChange: (String) -> Unit,
     onXorChange: (String) -> Unit,
@@ -291,9 +283,6 @@ private fun ConfigureTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        SectionLabel("Memory Scope")
-        RegionScopeChips(selected = regionFilter, onSelect = onRegionFilterChange)
-
         SectionLabel("Value Type")
         ValueTypeGrid(selected = selectedType, onSelect = onTypeChange)
 
@@ -366,26 +355,6 @@ private fun ConfigureTab(
                 "Snapshots all aligned slots — use comparison ops afterwards.",
                 color = OnSurface.copy(alpha = 0.55f), fontSize = 11.sp
             )
-        }
-    }
-}
-
-@Composable
-private fun RegionScopeChips(selected: RegionFilter, onSelect: (RegionFilter) -> Unit) {
-    val options = listOf(RegionFilter.HEAP_STACK_ANON, RegionFilter.ALL)
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(options.size) { i ->
-            val isSel = selected::class == options[i]::class
-            val color = if (isSel) Primary else OnSurface.copy(alpha = 0.5f)
-            Box(
-                Modifier.clip(RoundedCornerShape(20.dp))
-                    .background(if (isSel) Primary.copy(alpha = 0.15f) else SurfaceVariant)
-                    .border(1.dp, color.copy(alpha = if (isSel) 0.8f else 0.2f), RoundedCornerShape(20.dp))
-                    .clickable { onSelect(options[i]) }
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
-            ) {
-                Text(options[i].label, color = color, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
-            }
         }
     }
 }

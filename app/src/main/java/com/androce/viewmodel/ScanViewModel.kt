@@ -63,9 +63,8 @@ class ScanViewModel : ViewModel() {
     var rangeMax: String = ""
     var xorKey: Long = 0L
 
-    private val _regionFilter = MutableStateFlow<RegionFilter>(RegionFilter.HEAP_STACK_ANON)
+    private val _regionFilter = MutableStateFlow<RegionFilter>(RegionFilter.ALL)
     val regionFilter: StateFlow<RegionFilter> = _regionFilter
-    fun setRegionFilter(f: RegionFilter) { _regionFilter.value = f }
 
     private val _scanState = MutableStateFlow<ScanState>(ScanState.Idle)
     val scanState: StateFlow<ScanState> = _scanState
@@ -373,6 +372,57 @@ class ScanViewModel : ViewModel() {
         if (previous.isEmpty()) {
             firstScan(); return
         }
+
+        if (selectedValueType == ValueType.ALL) {
+            scanJob?.cancel()
+            scanJob = viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    withContext(Dispatchers.Main) {
+                        _scanState.value = ScanState.Scanning(ScanProgress(0, previous.size, 0))
+                    }
+                    val allResults = mutableListOf<ScanResult>()
+                    val byType = previous.groupBy { it.valueType }
+                    var processed = 0
+                    for ((type, items) in byType) {
+                        if (!isActive) break
+                        while (Scanner.paused) {
+                            delay(100); if (!isActive) break
+                        }
+                        val (pattern, wildcard) = try {
+                            ValueEncoder.encodeSearchValue(searchInput, type, xorKey)
+                        } catch (e: Exception) {
+                            processed += items.size
+                            continue
+                        }
+                        val found = Scanner.refinedScan(pid, items, pattern, wildcard) { p ->
+                            if (isActive) {
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    _scanState.value = ScanState.Scanning(
+                                        ScanProgress(processed + p.scannedRegions, previous.size, allResults.size + p.foundCount)
+                                    )
+                                }
+                            }
+                        }
+                        allResults.addAll(found)
+                        processed += items.size
+                    }
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _results.value = allResults
+                            _scanState.value = ScanState.Done(allResults)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _scanState.value = ScanState.Error(e.message ?: "Refined scan failed")
+                        }
+                    }
+                }
+            }
+            return
+        }
+
         val (pattern, wildcard) = try {
             ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
         } catch (e: Exception) {
@@ -434,6 +484,51 @@ class ScanViewModel : ViewModel() {
         if (op == ScanComparison.BETWEEN && operand2 == null) {
             _scanState.value = ScanState.Error("Between requires both min and max values"); return
         }
+
+        if (selectedValueType == ValueType.ALL) {
+            scanJob?.cancel()
+            scanJob = viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    withContext(Dispatchers.Main) {
+                        _scanState.value = ScanState.Scanning(ScanProgress(0, previous.size, 0))
+                    }
+                    val allResults = mutableListOf<ScanResult>()
+                    val byType = previous.groupBy { it.valueType }
+                    var processed = 0
+                    for ((type, items) in byType) {
+                        if (!isActive) break
+                        while (Scanner.paused) {
+                            delay(100); if (!isActive) break
+                        }
+                        val found = Scanner.comparisonScan(pid, items, op, type, operand1, operand2) { p ->
+                            if (isActive) {
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    _scanState.value = ScanState.Scanning(
+                                        ScanProgress(processed + p.scannedRegions, previous.size, allResults.size + p.foundCount)
+                                    )
+                                }
+                            }
+                        }
+                        allResults.addAll(found)
+                        processed += items.size
+                    }
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _results.value = allResults
+                            _scanState.value = ScanState.Done(allResults)
+                        }
+                    }
+                } catch (e: Exception) {
+                    if (isActive) {
+                        withContext(Dispatchers.Main) {
+                            _scanState.value = ScanState.Error(e.message ?: "Comparison failed")
+                        }
+                    }
+                }
+            }
+            return
+        }
+
         scanJob?.cancel()
         scanJob = viewModelScope.launch(Dispatchers.IO) {
             try {
