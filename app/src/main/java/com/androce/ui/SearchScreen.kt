@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -33,6 +35,12 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.QuestionMark
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -44,6 +52,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -53,6 +65,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +81,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.core.ScanProgress
+import com.androce.model.RegionFilter
+import com.androce.model.ScanComparison
 import com.androce.model.ValueType
 import com.androce.model.ValueTypeCategory
 import com.androce.ui.theme.Accent
@@ -81,6 +96,7 @@ import com.androce.ui.theme.SurfaceVariant
 import com.androce.ui.theme.Warning
 import com.androce.viewmodel.ScanState
 import com.androce.viewmodel.ScanViewModel
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,18 +108,30 @@ fun SearchScreen(
     val scanState by viewModel.scanState.collectAsState()
     val results by viewModel.results.collectAsState()
     val regions by viewModel.regions.collectAsState()
+    val regionFilter by viewModel.regionFilter.collectAsState()
+    val isPaused by viewModel.isPaused.collectAsState()
     val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
 
     var searchInput by remember { mutableStateOf(viewModel.searchInput) }
     var selectedType by remember { mutableStateOf(viewModel.selectedValueType) }
     var xorKey by remember { mutableStateOf(viewModel.xorKey.toString()) }
+    var rangeMin by remember { mutableStateOf(viewModel.rangeMin) }
+    var rangeMax by remember { mutableStateOf(viewModel.rangeMax) }
 
     val isScanning = scanState is ScanState.Scanning
+    val pagerState = rememberPagerState(pageCount = { 2 })
 
+    // Auto-navigate to results when scan completes
     LaunchedEffect(scanState) {
         if (scanState is ScanState.Done && (scanState as ScanState.Done).results.isNotEmpty()) {
             onViewResults()
         }
+    }
+
+    // When scan starts, jump to Scan tab
+    LaunchedEffect(isScanning) {
+        if (isScanning) scope.launch { pagerState.animateScrollToPage(1) }
     }
 
     fun triggerScan() {
@@ -116,164 +144,405 @@ fun SearchScreen(
 
     LaunchedEffect(Unit) { viewModel.loadRegions() }
 
+    val tabs = listOf(
+        Icons.Default.Tune to "Configure",
+        Icons.Default.PlayArrow to "Scan"
+    )
+
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Memory Search", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        Text(
-                            viewModel.selectedProcess?.let { "${it.name}  [PID ${it.pid}]" } ?: "",
-                            color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace
+            Column {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("Memory Search", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                            Text(
+                                viewModel.selectedProcess?.let { "${it.name}  [PID ${it.pid}]" } ?: "",
+                                color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                )
+                TabRow(
+                    selectedTabIndex = pagerState.currentPage,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = Primary,
+                    indicator = { tabPositions ->
+                        SecondaryIndicator(
+                            Modifier.tabIndicatorOffset(tabPositions[pagerState.currentPage]),
+                            color = Primary
                         )
+                    },
+                    divider = {}
+                ) {
+                    tabs.forEachIndexed { index, (icon, label) ->
+                        val selected = pagerState.currentPage == index
+                        Tab(
+                            selected = selected,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
+                            selectedContentColor = Primary,
+                            unselectedContentColor = OnSurface.copy(alpha = 0.5f)
+                        ) {
+                            Row(
+                                Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Text(label, fontSize = 13.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+                                // Badge on Scan tab showing result count
+                                if (index == 1 && results.isNotEmpty()) {
+                                    Box(
+                                        Modifier.clip(RoundedCornerShape(8.dp))
+                                            .background(AccentGreen.copy(alpha = 0.2f))
+                                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                                    ) {
+                                        Text("${results.size}", color = AccentGreen, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
                     }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
-            )
+                }
+            }
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            SectionLabel("Value Type")
-            ValueTypeGrid(selected = selectedType) { t ->
-                selectedType = t
-                viewModel.selectedValueType = t
-                searchInput = ""
-                viewModel.searchInput = ""
-            }
-
-            AnimatedVisibility(selectedType == ValueType.XOR4 || selectedType == ValueType.XOR8) {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    SectionLabel("XOR Key")
-                    OutlinedTextField(
-                        value = xorKey,
-                        onValueChange = { xorKey = it; viewModel.xorKey = it.toLongOrNull() ?: 0L },
-                        label = { Text("XOR Key (decimal)") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        trailingIcon = {
-                            if (xorKey.isNotEmpty()) {
-                                IconButton(onClick = { xorKey = ""; viewModel.xorKey = 0L }) {
-                                    Icon(Icons.Default.Clear, contentDescription = "Clear", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
-                                }
-                            }
-                        },
-                        colors = inputColors()
-                    )
-                }
-            }
-
-            SectionLabel("Search Value")
-            OutlinedTextField(
-                value = searchInput,
-                onValueChange = { searchInput = it; viewModel.searchInput = it },
-                label = { Text(searchHint(selectedType)) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = selectedType != ValueType.STRING_UTF8 && selectedType != ValueType.STRING_UTF16,
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = keyboardTypeFor(selectedType),
-                    imeAction = ImeAction.Search
-                ),
-                keyboardActions = KeyboardActions(onSearch = { triggerScan() }),
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Primary) },
-                trailingIcon = {
-                    if (searchInput.isNotEmpty()) {
-                        IconButton(onClick = { searchInput = ""; viewModel.searchInput = "" }) {
-                            Icon(Icons.Default.Clear, contentDescription = "Clear input", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
-                        }
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxSize().padding(padding)
+        ) { page ->
+            when (page) {
+                0 -> ConfigureTab(
+                    selectedType = selectedType,
+                    searchInput = searchInput,
+                    xorKey = xorKey,
+                    regionFilter = regionFilter,
+                    resultsEmpty = results.isEmpty(),
+                    onRegionFilterChange = { viewModel.setRegionFilter(it) },
+                    onTypeChange = { t ->
+                        selectedType = t
+                        viewModel.selectedValueType = t
+                        searchInput = ""
+                        viewModel.searchInput = ""
+                    },
+                    onSearchChange = { searchInput = it; viewModel.searchInput = it },
+                    onXorChange = { xorKey = it; viewModel.xorKey = it.toLongOrNull() ?: 0L },
+                    onScanReady = {
+                        scope.launch { pagerState.animateScrollToPage(1) }
+                        triggerScan()
+                    },
+                    onUnknownInitial = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.selectedValueType = selectedType
+                        viewModel.unknownInitialScan()
+                        scope.launch { pagerState.animateScrollToPage(1) }
                     }
-                },
-                colors = inputColors()
-            )
-
-            SectionLabel("Memory Regions")
-            AnimatedContent(
-                targetState = regions.size,
-                transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) },
-                label = "regions"
-            ) { count ->
-                Text(
-                    text = if (count == 0) "Loading regions…" else "$count readable regions",
-                    color = Accent, fontSize = 13.sp, fontFamily = FontFamily.Monospace
+                )
+                1 -> ScanTab(
+                    scanState = scanState,
+                    results = results,
+                    regions = regions,
+                    selectedType = selectedType,
+                    searchInput = searchInput,
+                    rangeMin = rangeMin,
+                    rangeMax = rangeMax,
+                    isScanning = isScanning,
+                    isPaused = isPaused,
+                    onRangeMinChange = { rangeMin = it; viewModel.rangeMin = it },
+                    onRangeMaxChange = { rangeMax = it; viewModel.rangeMax = it },
+                    onFirstScan = { triggerScan() },
+                    onRefinedScan = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.searchInput = searchInput
+                        viewModel.selectedValueType = selectedType
+                        viewModel.refinedScan()
+                    },
+                    onComparison = { op ->
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        viewModel.searchInput = searchInput
+                        viewModel.rangeMin = rangeMin
+                        viewModel.rangeMax = rangeMax
+                        viewModel.selectedValueType = selectedType
+                        viewModel.comparisonScan(op)
+                    },
+                    onStop = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.cancelScan() },
+                    onPauseResume = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.togglePause() },
+                    onReset = { viewModel.resetScan() },
+                    onViewResults = onViewResults,
+                    onGoToConfigure = { scope.launch { pagerState.animateScrollToPage(0) } }
                 )
             }
+        }
+    }
+}
 
-            AnimatedContent(
-                targetState = isScanning,
-                transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(150)) },
-                label = "scan_buttons"
-            ) { scanning ->
-                if (scanning) {
-                    Button(
-                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.cancelScan() },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Stop Scanning")
-                    }
-                } else {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Button(
-                            onClick = { triggerScan() },
-                            enabled = searchInput.isNotBlank(),
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = Primary)
-                        ) {
-                            Text("First Scan")
+@Composable
+private fun ConfigureTab(
+    selectedType: ValueType,
+    searchInput: String,
+    xorKey: String,
+    regionFilter: RegionFilter,
+    resultsEmpty: Boolean,
+    onRegionFilterChange: (RegionFilter) -> Unit,
+    onTypeChange: (ValueType) -> Unit,
+    onSearchChange: (String) -> Unit,
+    onXorChange: (String) -> Unit,
+    onScanReady: () -> Unit,
+    onUnknownInitial: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        SectionLabel("Memory Scope")
+        RegionScopeChips(selected = regionFilter, onSelect = onRegionFilterChange)
+
+        SectionLabel("Value Type")
+        ValueTypeGrid(selected = selectedType, onSelect = onTypeChange)
+
+        AnimatedVisibility(selectedType == ValueType.XOR4 || selectedType == ValueType.XOR8) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionLabel("XOR Key")
+                OutlinedTextField(
+                    value = xorKey,
+                    onValueChange = onXorChange,
+                    label = { Text("XOR Key (decimal)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    trailingIcon = {
+                        if (xorKey.isNotEmpty()) {
+                            IconButton(onClick = { onXorChange("") }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Clear", tint = OnSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
+                            }
                         }
+                    },
+                    colors = inputColors()
+                )
+            }
+        }
+
+        SectionLabel("Search Value")
+        OutlinedTextField(
+            value = searchInput,
+            onValueChange = onSearchChange,
+            label = { Text(searchHint(selectedType)) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = selectedType != ValueType.STRING_UTF8 && selectedType != ValueType.STRING_UTF16,
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardTypeFor(selectedType), imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { if (searchInput.isNotBlank()) onScanReady() }),
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Primary) },
+            trailingIcon = {
+                if (searchInput.isNotEmpty()) {
+                    IconButton(onClick = { onSearchChange("") }) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear", tint = OnSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
+                    }
+                }
+            },
+            colors = inputColors()
+        )
+
+        // "Go to Scan" button at the bottom of configure tab
+        Button(
+            onClick = onScanReady,
+            enabled = searchInput.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = Primary)
+        ) {
+            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Start Scan", fontWeight = FontWeight.Bold)
+        }
+
+        // Unknown initial value — only meaningful when starting fresh
+        if (resultsEmpty && !selectedType.isVariableLength) {
+            Button(
+                onClick = onUnknownInitial,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant)
+            ) {
+                Icon(Icons.Default.QuestionMark, contentDescription = null, modifier = Modifier.size(16.dp), tint = Accent)
+                Spacer(Modifier.width(8.dp))
+                Text("Unknown Initial Value", color = Accent)
+            }
+            Text(
+                "Snapshots all aligned slots — use comparison ops afterwards.",
+                color = OnSurface.copy(alpha = 0.55f), fontSize = 11.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun RegionScopeChips(selected: RegionFilter, onSelect: (RegionFilter) -> Unit) {
+    val options = listOf(RegionFilter.HEAP_STACK_ANON, RegionFilter.ALL)
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(options.size) { i ->
+            val opt = options[i]
+            val isSel = selected::class == opt::class
+            val color = if (isSel) Primary else OnSurface.copy(alpha = 0.5f)
+            Box(
+                Modifier.clip(RoundedCornerShape(20.dp))
+                    .background(if (isSel) Primary.copy(alpha = 0.15f) else SurfaceVariant)
+                    .border(1.dp, color.copy(alpha = if (isSel) 0.8f else 0.2f), RoundedCornerShape(20.dp))
+                    .clickable { onSelect(opt) }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(opt.label, color = color, fontSize = 12.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScanTab(
+    scanState: ScanState,
+    results: List<com.androce.model.ScanResult>,
+    regions: List<com.androce.model.MemoryRegion>,
+    selectedType: ValueType,
+    searchInput: String,
+    isScanning: Boolean,
+    onFirstScan: () -> Unit,
+    onRefinedScan: () -> Unit,
+    onStop: () -> Unit,
+    onReset: () -> Unit,
+    onViewResults: () -> Unit,
+    onGoToConfigure: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Summary card showing what will be scanned
+        Box(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                .background(SurfaceVariant).padding(14.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Target", color = OnSurface.copy(alpha = 0.6f), fontSize = 10.sp, letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        val typeColor = categoryColorFor(selectedType.category)
+                        Box(Modifier.clip(RoundedCornerShape(6.dp)).background(typeColor.copy(alpha = 0.15f))
+                            .border(1.dp, typeColor.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 3.dp)) {
+                            Text(selectedType.label, color = typeColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        if (searchInput.isNotBlank()) {
+                            Text("= $searchInput", color = OnBackground, fontSize = 13.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                        } else {
+                            Text("No value set", color = OnSurface.copy(alpha = 0.4f), fontSize = 12.sp)
+                        }
+                    }
+                }
+                AnimatedContent(targetState = regions.size, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) }, label = "rcount") { count ->
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(if (count == 0) "…" else "$count", color = Accent, fontSize = 18.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                        Text("regions", color = OnSurface.copy(alpha = 0.5f), fontSize = 10.sp)
+                    }
+                }
+            }
+        }
+
+        // Scan action buttons
+        AnimatedContent(
+            targetState = isScanning,
+            transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(150)) },
+            label = "scan_buttons"
+        ) { scanning ->
+            if (scanning) {
+                Button(
+                    onClick = onStop,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Stop Scanning")
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = onFirstScan,
+                        enabled = searchInput.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Primary)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("First Scan", fontWeight = FontWeight.Bold)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
-                            onClick = {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                viewModel.searchInput = searchInput
-                                viewModel.selectedValueType = selectedType
-                                viewModel.refinedScan()
-                            },
+                            onClick = onRefinedScan,
                             enabled = results.isNotEmpty() && searchInput.isNotBlank(),
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant)
                         ) {
                             Text("Refined Scan")
                         }
+                        Button(
+                            onClick = onReset,
+                            enabled = results.isNotEmpty() || scanState is ScanState.Done,
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                        ) {
+                            Text("Reset")
+                        }
                     }
-                }
-            }
-
-            Button(
-                onClick = { viewModel.resetScan() },
-                enabled = results.isNotEmpty() || scanState is ScanState.Done,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-            ) {
-                Text("Reset / New Scan")
-            }
-
-            when (val s = scanState) {
-                is ScanState.Scanning -> ScanProgressCard(s.progress)
-                is ScanState.Done -> ResultsBadge(count = s.results.size, onClick = onViewResults)
-                is ScanState.Error -> Text("Error: ${s.message}", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
-                else -> {
-                    if (results.isNotEmpty()) {
-                        ResultsBadge(count = results.size, onClick = onViewResults)
+                    if (searchInput.isBlank()) {
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                                .background(Warning.copy(alpha = 0.1f)).border(1.dp, Warning.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                .clickable(onClick = onGoToConfigure).padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.Tune, contentDescription = null, tint = Warning, modifier = Modifier.size(16.dp))
+                            Text("Set a value in Configure tab first", color = Warning, fontSize = 12.sp)
+                        }
                     }
                 }
             }
         }
+
+        // Progress / results
+        when (val s = scanState) {
+            is ScanState.Scanning -> ScanProgressCard(s.progress)
+            is ScanState.Done -> ResultsBadge(count = s.results.size, onClick = onViewResults)
+            is ScanState.Error -> Box(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.1f)).padding(14.dp)
+            ) {
+                Text("Error: ${s.message}", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+            }
+            else -> if (results.isNotEmpty()) ResultsBadge(count = results.size, onClick = onViewResults)
+        }
     }
+}
+
+private fun categoryColorFor(cat: ValueTypeCategory): Color = when (cat) {
+    ValueTypeCategory.INTEGER -> Primary
+    ValueTypeCategory.FLOAT   -> Accent
+    ValueTypeCategory.TEXT    -> AccentGreen
+    ValueTypeCategory.SPECIAL -> Warning
 }
 
 @Composable

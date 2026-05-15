@@ -4,6 +4,7 @@ data class ScanResult(
     val address: Long,
     val valueType: ValueType,
     var currentBytes: ByteArray,
+    var previousBytes: ByteArray? = null,
     var frozen: Boolean = false,
     var selected: Boolean = false
 ) {

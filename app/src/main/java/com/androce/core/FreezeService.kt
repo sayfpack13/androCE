@@ -76,8 +76,10 @@ class FreezeService : Service() {
                 val snapshot: List<FrozenEntry> = synchronized(frozenEntries) {
                     frozenEntries.values.toList()
                 }
-                for (entry in snapshot) {
-                    MemoryWriter.writeBytes(entry.pid, entry.address, entry.bytes)
+                // Group by PID, then write each group in a single Python process per tick.
+                snapshot.groupBy { it.pid }.forEach { (pid, entries) ->
+                    val writes = entries.map { it.address to it.bytes }
+                    MemoryWriter.writeBytesMany(pid, writes)
                 }
                 delay(FREEZE_INTERVAL_MS)
             }

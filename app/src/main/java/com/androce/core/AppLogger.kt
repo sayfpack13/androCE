@@ -16,8 +16,11 @@ object AppLogger {
 
     private var logFile: File? = null
     private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+    var filesDir: File? = null
+        private set
 
     fun init(context: Context) {
+        filesDir = context.filesDir
         val dir = context.getExternalFilesDir(null) ?: context.filesDir
         logFile = File(dir, LOG_FILE)
         if (logFile!!.exists() && logFile!!.length() > MAX_FILE_SIZE) {
