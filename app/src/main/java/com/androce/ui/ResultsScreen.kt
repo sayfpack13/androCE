@@ -183,6 +183,24 @@ fun ResultsScreen(
                             )
                             if (selectedCount > 0) {
                                 DropdownMenuItem(
+                                    text = { Text("Freeze Selected ($selectedCount)") },
+                                    leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = Accent) },
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.bulkFreezeSelected(true)
+                                        scope.launch { snackBarHostState.showSnackbar("Froze $selectedCount addresses") }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Unfreeze Selected ($selectedCount)") },
+                                    leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)) },
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.bulkFreezeSelected(false)
+                                        scope.launch { snackBarHostState.showSnackbar("Unfroze $selectedCount addresses") }
+                                    }
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Delete Selected ($selectedCount)") },
                                     leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
                                     onClick = {
@@ -279,11 +297,22 @@ fun ResultsScreen(
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    viewModel.writeBulk(selectedAddresses, bulkWriteValue)
-                    showBulkWriteDialog = false
-                    bulkWriteValue = ""
-                }) { Text("Write", color = Primary) }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = {
+                        viewModel.writeBulkAndFreeze(selectedAddresses, bulkWriteValue)
+                        showBulkWriteDialog = false
+                        bulkWriteValue = ""
+                    }) {
+                        Icon(Icons.Default.AcUnit, contentDescription = null, tint = Accent, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Write & Freeze", color = Accent)
+                    }
+                    TextButton(onClick = {
+                        viewModel.writeBulk(selectedAddresses, bulkWriteValue)
+                        showBulkWriteDialog = false
+                        bulkWriteValue = ""
+                    }) { Text("Write", color = Primary) }
+                }
             },
             dismissButton = {
                 TextButton(onClick = { showBulkWriteDialog = false }) {

@@ -417,7 +417,7 @@ private fun ScanTab(
         SettingsCard {
             SettingsDropdown(
                 label = "Freeze write interval",
-                options = listOf(50L to "50 ms", 100L to "100 ms", 200L to "200 ms", 500L to "500 ms"),
+                options = listOf(10L to "10 ms (aggressive)", 25L to "25 ms", 50L to "50 ms", 100L to "100 ms", 200L to "200 ms", 500L to "500 ms"),
                 selected = freezeMs,
                 onSelected = onFreezeChanged
             )

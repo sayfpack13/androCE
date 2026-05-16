@@ -317,6 +317,8 @@ int write_mode(int argc, char **argv) {
     int pid = atoi(argv[2]);
     int ok = 1;
 
+    open_mem_fd(pid);
+
     for (int i = 3; i < argc; i++) {
         unsigned long addr;
         char hex[1024];
@@ -328,14 +330,23 @@ int write_mode(int argc, char **argv) {
 
         hex_to_bytes(hex, buf, len);
 
-        struct iovec local = { buf, len };
-        struct iovec remote = { (void *)addr, len };
-        ssize_t n = process_vm_writev(pid, &local, 1, &remote, 1, 0);
-        if (n != len) ok = 0;
+        ssize_t n = -1;
+        if (g_mem_fd >= 0) {
+            /* Try /proc/pid/mem pwrite first — reliable byte-offset writes */
+            n = pwrite(g_mem_fd, buf, len, (off_t)addr);
+        }
+        if (n != len) {
+            /* Fallback to process_vm_writev */
+            struct iovec local = { buf, len };
+            struct iovec remote = { (void *)addr, len };
+            n = process_vm_writev(pid, &local, 1, &remote, 1, 0);
+            if (n != len) ok = 0;
+        }
 
         free(buf);
     }
 
+    if (g_mem_fd >= 0) { close(g_mem_fd); g_mem_fd = -1; }
     printf("# ok:%d\n", ok);
     return 0;
 }

@@ -18,6 +18,8 @@ object MemoryReader {
 
     val isPythonAvailable: Boolean get() = pythonAvailable
     val isNativeHelperReady: Boolean get() = nativeHelperPath.isNotEmpty()
+    val nativeHelper: String get() = nativeHelperPath
+    val pythonCmd: String get() = pythonBinary
 
     /** Whether to use Python for scanning, respecting the user's scan engine preference */
     val usePython: Boolean get() = when (AppPrefs.scanEngine) {

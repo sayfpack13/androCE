@@ -30,12 +30,14 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -87,6 +89,8 @@ class MainActivity : ComponentActivity() {
             AndroCETheme {
                 val processVm: ProcessViewModel = viewModel()
                 val scanVm: ScanViewModel = viewModel()
+                val context = LocalContext.current
+                LaunchedEffect(Unit) { scanVm.bindFreezeService(context) }
                 var screen by remember { currentScreen }
                 var selectedTab by remember { bottomTab }
 

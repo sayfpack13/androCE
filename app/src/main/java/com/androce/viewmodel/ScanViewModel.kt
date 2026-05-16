@@ -711,11 +711,18 @@ class ScanViewModel : ViewModel() {
 
     fun writeBulk(addresses: List<Long>, newValue: String) {
         val pid = selectedProcess?.pid ?: return
+        val service = freezeService
         val bytes = ValueEncoder.encodeWriteValue(newValue, selectedValueType, xorKey) ?: return
         val addrSet = addresses.toSet()
         viewModelScope.launch(Dispatchers.IO) {
             val writes = addresses.map { it to bytes }
             MemoryWriter.writeBytesMany(pid, writes)
+            // Update frozen bytes so freeze loop writes the new value
+            if (service != null) {
+                for (addr in addresses) {
+                    if (service.isFrozen(addr)) service.updateFreezeBytes(addr, bytes)
+                }
+            }
             withContext(Dispatchers.Main) {
                 _results.value = _results.value.map { r ->
                     if (r.address in addrSet) r.copy(
@@ -740,6 +747,45 @@ class ScanViewModel : ViewModel() {
         else service.addFreeze(pid, result.address, result.currentBytes)
         _results.value = _results.value.map {
             if (it.address == result.address) it.copy(frozen = !it.frozen) else it
+        }
+    }
+
+    fun bulkFreezeSelected(freeze: Boolean) {
+        val pid = selectedProcess?.pid ?: return
+        val service = freezeService ?: return
+        val selected = _results.value.filter { it.selected }
+        for (r in selected) {
+            if (freeze && !r.frozen) service.addFreeze(pid, r.address, r.currentBytes)
+            else if (!freeze && r.frozen) service.removeFreeze(r.address)
+        }
+        val addrSet = selected.map { it.address }.toSet()
+        _results.value = _results.value.map {
+            if (it.address in addrSet) it.copy(frozen = freeze) else it
+        }
+    }
+
+    fun writeBulkAndFreeze(addresses: List<Long>, newValue: String) {
+        val pid = selectedProcess?.pid ?: return
+        val service = freezeService ?: return
+        val bytes = ValueEncoder.encodeWriteValue(newValue, selectedValueType, xorKey) ?: return
+        val addrSet = addresses.toSet()
+        viewModelScope.launch(Dispatchers.IO) {
+            val writes = addresses.map { it to bytes }
+            MemoryWriter.writeBytesMany(pid, writes)
+            for (addr in addresses) {
+                service.addFreeze(pid, addr, bytes)
+            }
+            withContext(Dispatchers.Main) {
+                _results.value = _results.value.map { r ->
+                    if (r.address in addrSet) r.copy(
+                        previousBytes = bytes.copyOf(),
+                        currentBytes = bytes.copyOf(),
+                        frozen = true,
+                        changeDirection = ChangeDirection.NONE,
+                        deltaDisplay = ""
+                    ) else r
+                }
+            }
         }
     }
 

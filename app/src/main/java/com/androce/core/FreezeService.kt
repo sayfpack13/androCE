@@ -16,6 +16,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import com.topjohnwu.superuser.Shell
 
 class FreezeService : Service() {
 
@@ -66,6 +67,13 @@ class FreezeService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
+    fun updateFreezeBytes(address: Long, bytes: ByteArray) {
+        synchronized(frozenEntries) {
+            val entry = frozenEntries[address] ?: return
+            frozenEntries[address] = entry.copy(bytes = bytes.copyOf())
+        }
+    }
+
     fun isFrozen(address: Long): Boolean = synchronized(frozenEntries) { frozenEntries.containsKey(address) }
 
     fun getFrozenCount(): Int = synchronized(frozenEntries) { frozenEntries.size }
@@ -77,10 +85,20 @@ class FreezeService : Service() {
                 val snapshot: List<FrozenEntry> = synchronized(frozenEntries) {
                     frozenEntries.values.toList()
                 }
-                // Group by PID, then write each group in a single Python process per tick.
+                val nativePath = MemoryReader.nativeHelper
                 snapshot.groupBy { it.pid }.forEach { (pid, entries) ->
-                    val writes = entries.map { it.address to it.bytes }
-                    MemoryWriter.writeBytesMany(pid, writes)
+                    if (nativePath.isNotEmpty()) {
+                        // Use Runtime.exec via su — bypasses libsu's serialized shell
+                        val args = entries.joinToString(" ") { e ->
+                            "${e.address}:${e.bytes.joinToString("") { "%02x".format(it) }}"
+                        }
+                        try {
+                            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "$nativePath write $pid $args"))
+                            proc.waitFor()
+                        } catch (_: Exception) {}
+                    } else {
+                        Shell.cmd("true").exec() // no-op if native helper unavailable
+                    }
                 }
                 delay(AppPrefs.freezeIntervalMs)
             }
