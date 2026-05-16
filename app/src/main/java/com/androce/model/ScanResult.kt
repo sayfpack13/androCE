@@ -26,8 +26,12 @@ data class ScanResult(
         ValueType.BYTE8 -> bytesToLong(currentBytes).toString()
         ValueType.FLOAT -> java.lang.Float.intBitsToFloat(bytesToInt(currentBytes)).toString()
         ValueType.DOUBLE -> java.lang.Double.longBitsToDouble(bytesToLong(currentBytes)).toString()
-        ValueType.STRING_UTF8 -> String(currentBytes, Charsets.UTF_8)
-        ValueType.STRING_UTF16 -> String(currentBytes, Charsets.UTF_16LE)
+        ValueType.STRING -> {
+            val utf8 = String(currentBytes, Charsets.UTF_8)
+            val utf16 = String(currentBytes, Charsets.UTF_16LE)
+            // Prefer UTF-8 if valid (no replacement chars), else UTF-16LE
+            if (utf8.contains('\uFFFD')) utf16 else utf8
+        }
         ValueType.BYTE_ARRAY -> currentBytes.joinToString(" ") { "%02X".format(it) }
         ValueType.XOR4 -> bytesToInt(currentBytes).toString()
         ValueType.XOR8 -> bytesToLong(currentBytes).toString()

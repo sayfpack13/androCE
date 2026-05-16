@@ -42,8 +42,7 @@ object ValueEncoder {
                 val v = input.trim().toDouble()
                 Pair(longToBytes(java.lang.Double.doubleToLongBits(v)), null)
             }
-            ValueType.STRING_UTF8 -> Pair(input.toByteArray(Charsets.UTF_8), null)
-            ValueType.STRING_UTF16 -> Pair(input.toByteArray(Charsets.UTF_16LE), null)
+            ValueType.STRING -> Pair(input.toByteArray(Charsets.UTF_8), null)
             ValueType.BYTE_ARRAY -> {
                 val tokens = input.trim().split("\\s+".toRegex())
                 val pattern = tokens.map {
@@ -76,8 +75,7 @@ object ValueEncoder {
                 ValueType.BYTE8 -> longToBytes(input.trim().toLong())
                 ValueType.FLOAT -> intToBytes(java.lang.Float.floatToIntBits(input.trim().toFloat()))
                 ValueType.DOUBLE -> longToBytes(java.lang.Double.doubleToLongBits(input.trim().toDouble()))
-                ValueType.STRING_UTF8 -> input.toByteArray(Charsets.UTF_8)
-                ValueType.STRING_UTF16 -> input.toByteArray(Charsets.UTF_16LE)
+                ValueType.STRING -> input.toByteArray(Charsets.UTF_8)
                 ValueType.BYTE_ARRAY -> {
                     input.trim().split("\\s+".toRegex())
                         .filter { it != "??" }

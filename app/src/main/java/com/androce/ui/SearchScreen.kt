@@ -342,7 +342,7 @@ private fun ScanTab(
                         onValueChange = onSearchChange,
                         label = { Text(if (results.isEmpty()) "Search value" else "New value to refine") },
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = selectedType != ValueType.STRING_UTF8 && selectedType != ValueType.STRING_UTF16,
+                        singleLine = selectedType != ValueType.STRING,
                         keyboardOptions = KeyboardOptions(
                             keyboardType = keyboardTypeFor(selectedType),
                             imeAction = ImeAction.Search
@@ -660,8 +660,7 @@ private fun searchHint(type: ValueType): String = when (type) {
     ValueType.BYTE8 -> "Long value"
     ValueType.FLOAT -> "Float (e.g. 3.14)"
     ValueType.DOUBLE -> "Double"
-    ValueType.STRING_UTF8 -> "UTF-8 string"
-    ValueType.STRING_UTF16 -> "UTF-16 string"
+    ValueType.STRING -> "Any text"
     ValueType.BYTE_ARRAY -> "Hex bytes e.g. FF 4A ?? 00"
     ValueType.XOR4 -> "Int (XOR with key)"
     ValueType.XOR8 -> "Long (XOR with key)"
@@ -669,7 +668,7 @@ private fun searchHint(type: ValueType): String = when (type) {
 }
 
 private fun keyboardTypeFor(type: ValueType): KeyboardType = when (type) {
-    ValueType.STRING_UTF8, ValueType.STRING_UTF16, ValueType.BYTE_ARRAY -> KeyboardType.Text
+    ValueType.STRING, ValueType.BYTE_ARRAY -> KeyboardType.Text
     ValueType.FLOAT, ValueType.DOUBLE -> KeyboardType.Decimal
     else -> KeyboardType.Number
 }
@@ -696,7 +695,7 @@ private fun isInputValid(input: String, type: ValueType): Boolean {
             ValueType.BYTE8 -> input.toLongOrNull() != null
             ValueType.FLOAT -> input.toFloatOrNull() != null
             ValueType.DOUBLE -> input.toDoubleOrNull() != null
-            ValueType.STRING_UTF8, ValueType.STRING_UTF16 -> true
+            ValueType.STRING -> true
             ValueType.BYTE_ARRAY -> input.matches(Regex("^([0-9A-Fa-f]{2} )*[0-9A-Fa-f]{2}$"))
             ValueType.XOR4 -> input.toLongOrNull() != null
             ValueType.XOR8 -> input.toLongOrNull() != null
@@ -712,8 +711,7 @@ private fun inputHelperText(type: ValueType): String = when (type) {
     ValueType.BYTE8 -> "Any whole number"
     ValueType.FLOAT -> "Decimal number (e.g., 3.14)"
     ValueType.DOUBLE -> "Decimal number"
-    ValueType.STRING_UTF8 -> "Any text"
-    ValueType.STRING_UTF16 -> "Any text"
+    ValueType.STRING -> "Any text"
     ValueType.BYTE_ARRAY -> "Hex pairs separated by spaces (e.g., A1 B2 C3)"
     ValueType.XOR4 -> "Integer value"
     ValueType.XOR8 -> "Integer value"

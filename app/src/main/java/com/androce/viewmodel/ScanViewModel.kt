@@ -203,48 +203,93 @@ class ScanViewModel : ViewModel() {
                 }
             }
         } else {
-            // Normal single-type scan
-            val (pattern, wildcard) = try {
-                ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
-            } catch (e: Exception) {
-                viewModelScope.launch(Dispatchers.Main) {
-                    _scanState.value = ScanState.Error(e.message ?: "Invalid value")
-                }
-                return
-            }
-
-            AppLogger.d(
-                "ScanViewModel",
-                "firstScan: input='$searchInput' type=$selectedValueType xorKey=$xorKey pattern=${
-                    pattern.joinToString(" ") { "%02x".format(it) }
-                }"
-            )
-
             scanJob?.cancel()
             scanJob = viewModelScope.launch(Dispatchers.IO) {
                 try {
                     withContext(Dispatchers.Main) {
                         _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
                     }
-                    val results = Scanner.firstScan(
-                        pid = pid,
-                        valueType = selectedValueType,
-                        pattern = pattern,
-                        wildcard = wildcard,
-                        regions = _regions.value,
-                        regionFilter = _regionFilter.value,
-                        onProgress = { progress ->
-                            if (isActive) {
-                                viewModelScope.launch(Dispatchers.Main) {
-                                    _scanState.value = ScanState.Scanning(progress)
+
+                    val allResults = if (selectedValueType == ValueType.STRING) {
+                        // Search for both UTF-8 and UTF-16LE encodings
+                        val utf8Pattern = searchInput.toByteArray(Charsets.UTF_8)
+                        val utf16Pattern = searchInput.toByteArray(Charsets.UTF_16LE)
+
+                        AppLogger.d("ScanViewModel", "firstScan STRING: utf8=${utf8Pattern.size}b utf16=${utf16Pattern.size}b")
+
+                        val utf8Results = Scanner.firstScan(
+                            pid = pid,
+                            valueType = ValueType.STRING,
+                            pattern = utf8Pattern,
+                            wildcard = null,
+                            regions = _regions.value,
+                            regionFilter = _regionFilter.value,
+                            onProgress = { progress ->
+                                if (isActive) {
+                                    viewModelScope.launch(Dispatchers.Main) {
+                                        _scanState.value = ScanState.Scanning(progress.copy(foundCount = progress.foundCount))
+                                    }
                                 }
                             }
+                        )
+                        val utf16Results = Scanner.firstScan(
+                            pid = pid,
+                            valueType = ValueType.STRING,
+                            pattern = utf16Pattern,
+                            wildcard = null,
+                            regions = _regions.value,
+                            regionFilter = _regionFilter.value,
+                            onProgress = { progress ->
+                                if (isActive) {
+                                    viewModelScope.launch(Dispatchers.Main) {
+                                        _scanState.value = ScanState.Scanning(
+                                            progress.copy(foundCount = utf8Results.size + progress.foundCount)
+                                        )
+                                    }
+                                }
+                            }
+                        )
+                        // Combine and deduplicate by address
+                        val combined = (utf8Results + utf16Results)
+                            .distinctBy { it.address }
+                        AppLogger.d("ScanViewModel", "firstScan STRING: utf8=${utf8Results.size} utf16=${utf16Results.size} unique=${combined.size}")
+                        combined
+                    } else {
+                        val (pattern, wildcard) = try {
+                            ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                _scanState.value = ScanState.Error(e.message ?: "Invalid value")
+                            }
+                            return@launch
                         }
-                    )
+                        AppLogger.d(
+                            "ScanViewModel",
+                            "firstScan: input='$searchInput' type=$selectedValueType pattern=${
+                                pattern.joinToString(" ") { "%02x".format(it) }
+                            }"
+                        )
+                        Scanner.firstScan(
+                            pid = pid,
+                            valueType = selectedValueType,
+                            pattern = pattern,
+                            wildcard = wildcard,
+                            regions = _regions.value,
+                            regionFilter = _regionFilter.value,
+                            onProgress = { progress ->
+                                if (isActive) {
+                                    viewModelScope.launch(Dispatchers.Main) {
+                                        _scanState.value = ScanState.Scanning(progress)
+                                    }
+                                }
+                            }
+                        )
+                    }
+
                     if (isActive) {
                         withContext(Dispatchers.Main) {
-                            _results.value = results
-                            _scanState.value = ScanState.Done(results)
+                            _results.value = allResults
+                            _scanState.value = ScanState.Done(allResults)
                         }
                     }
                 } catch (e: Exception) {
@@ -423,18 +468,47 @@ class ScanViewModel : ViewModel() {
             return
         }
 
-        val (pattern, wildcard) = try {
-            ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
-        } catch (e: Exception) {
-            _scanState.value = ScanState.Error("Invalid input: ${e.message}"); return
-        }
         scanJob?.cancel()
         scanJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                val found = Scanner.refinedScan(pid, previous, pattern, wildcard) { p ->
-                    if (isActive) {
-                        viewModelScope.launch(Dispatchers.Main) {
-                            _scanState.value = ScanState.Scanning(p)
+                val found = if (selectedValueType == ValueType.STRING) {
+                    // Refined scan for both UTF-8 and UTF-16 patterns
+                    val utf8Pattern = searchInput.toByteArray(Charsets.UTF_8)
+                    val utf16Pattern = searchInput.toByteArray(Charsets.UTF_16LE)
+                    val utf8Results = Scanner.refinedScan(pid, previous, utf8Pattern, null) { p ->
+                        if (isActive) {
+                            viewModelScope.launch(Dispatchers.Main) {
+                                _scanState.value = ScanState.Scanning(p)
+                            }
+                        }
+                    }
+                    val remaining = previous.filter { p -> p.address !in utf8Results.map { it.address }.toSet() }
+                    val utf16Results = if (remaining.isNotEmpty()) {
+                        Scanner.refinedScan(pid, remaining, utf16Pattern, null) { p ->
+                            if (isActive) {
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    _scanState.value = ScanState.Scanning(
+                                        p.copy(foundCount = utf8Results.size + p.foundCount)
+                                    )
+                                }
+                            }
+                        }
+                    } else emptyList()
+                    (utf8Results + utf16Results)
+                } else {
+                    val (pattern, wildcard) = try {
+                        ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            _scanState.value = ScanState.Error("Invalid input: ${e.message}")
+                        }
+                        return@launch
+                    }
+                    Scanner.refinedScan(pid, previous, pattern, wildcard) { p ->
+                        if (isActive) {
+                            viewModelScope.launch(Dispatchers.Main) {
+                                _scanState.value = ScanState.Scanning(p)
+                            }
                         }
                     }
                 }
