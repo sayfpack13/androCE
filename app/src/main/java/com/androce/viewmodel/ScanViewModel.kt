@@ -17,6 +17,7 @@ import com.androce.core.ValueEncoder
 import com.androce.model.CheatTable
 import com.androce.model.CheatTableEntry
 import com.androce.model.MemoryRegion
+import com.androce.model.ChangeDirection
 import com.androce.model.ProcessInfo
 import com.androce.model.RegionFilter
 import com.androce.model.ScanComparison
@@ -692,6 +693,7 @@ class ScanViewModel : ViewModel() {
     fun refreshValues() {
         val pid = selectedProcess?.pid ?: return
         if (isRefreshing) return
+        if (_scanState.value is ScanState.Scanning) return
         isRefreshing = true
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -714,7 +716,12 @@ class ScanViewModel : ViewModel() {
             MemoryWriter.writeBytesMany(pid, writes)
             withContext(Dispatchers.Main) {
                 _results.value = _results.value.map { r ->
-                    if (r.address in addrSet) r.copy(currentBytes = bytes.copyOf()) else r
+                    if (r.address in addrSet) r.copy(
+                        previousBytes = bytes.copyOf(),
+                        currentBytes = bytes.copyOf(),
+                        changeDirection = ChangeDirection.NONE,
+                        deltaDisplay = ""
+                    ) else r
                 }
             }
         }

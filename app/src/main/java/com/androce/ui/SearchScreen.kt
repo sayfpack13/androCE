@@ -298,6 +298,7 @@ private fun ScanTab(
         if (results.isNotEmpty() && !isScanning) {
             ComparisonControlRow(
                 selectedType = selectedType,
+                searchInput = searchInput,
                 rangeMin = rangeMin,
                 rangeMax = rangeMax,
                 onRangeMinChange = onRangeMinChange,
@@ -337,10 +338,18 @@ private fun ScanTab(
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     // Search input always visible in Scan tab for easy value changes
                     val inputValid = searchInput.isBlank() || isInputValid(searchInput, selectedType)
+                    val hasResults = results.isNotEmpty()
                     OutlinedTextField(
                         value = searchInput,
                         onValueChange = onSearchChange,
-                        label = { Text(if (results.isEmpty()) "Search value" else "New value to refine") },
+                        label = {
+                            Text(
+                                when {
+                                    !hasResults -> "Search value"
+                                    else -> "Value for refine / compare"
+                                }
+                            )
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = selectedType != ValueType.STRING,
                         keyboardOptions = KeyboardOptions(
@@ -359,8 +368,13 @@ private fun ScanTab(
                             }
                         },
                         supportingText = {
-                            if (searchInput.isNotBlank() && !inputValid) {
-                                Text(inputHelperText(selectedType), color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
+                            when {
+                                searchInput.isNotBlank() && !inputValid -> {
+                                    Text(inputHelperText(selectedType), color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
+                                }
+                                hasResults && searchInput.isBlank() -> {
+                                    Text("Enter a value for EXACT / INCREASED_BY / DECREASED_BY", color = OnSurface.copy(alpha = 0.5f), fontSize = 11.sp)
+                                }
                             }
                         },
                         isError = searchInput.isNotBlank() && !inputValid,
@@ -519,6 +533,7 @@ private fun ValueTypeDropdown(selected: ValueType, onSelect: (ValueType) -> Unit
 @Composable
 private fun ComparisonControlRow(
     selectedType: ValueType,
+    searchInput: String,
     rangeMin: String,
     rangeMax: String,
     onRangeMinChange: (String) -> Unit,
@@ -527,6 +542,7 @@ private fun ComparisonControlRow(
 ) {
     var selectedOp by remember { mutableStateOf<ScanComparison?>(null) }
     val haptic = LocalHapticFeedback.current
+    val hasValue = searchInput.isNotBlank()
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SectionLabel("Compare against previous")
@@ -552,21 +568,37 @@ private fun ComparisonControlRow(
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             val valueOps = ScanComparison.entries.filter { it !in ScanComparison.withoutValue }
             items(valueOps.size) { i ->
-                val isSel = selectedOp == valueOps[i]
+                val op = valueOps[i]
+                val isSel = selectedOp == op
+                val enabled = when (op) {
+                    ScanComparison.BETWEEN -> true // BETWEEN uses range inputs
+                    else -> hasValue // EXACT / INCREASED_BY / DECREASED_BY need searchInput
+                }
+                val alpha = if (enabled) 1f else 0.4f
                 Box(
                     Modifier.clip(RoundedCornerShape(18.dp))
                         .background(if (isSel) Accent.copy(alpha = 0.2f) else SurfaceVariant)
                         .border(1.dp, if (isSel) Accent else SurfaceHigh, RoundedCornerShape(18.dp))
-                        .clickable {
+                        .clickable(enabled = enabled) {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            selectedOp = valueOps[i]
-                            if (valueOps[i] != ScanComparison.BETWEEN) {
-                                onComparison(valueOps[i])
+                            selectedOp = op
+                            if (op != ScanComparison.BETWEEN) {
+                                onComparison(op)
                             }
                         }
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
-                    Text(valueOps[i].label, color = if (isSel) Accent else OnSurface, fontSize = 11.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(op.label, color = if (isSel) Accent.copy(alpha = alpha) else OnSurface.copy(alpha = alpha), fontSize = 11.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
+                        if (op == ScanComparison.INCREASED_BY || op == ScanComparison.DECREASED_BY) {
+                            Text(
+                                if (hasValue) "Δ $searchInput" else "needs Δ",
+                                color = if (hasValue) AccentGreen.copy(alpha = alpha) else Warning.copy(alpha = alpha),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -435,160 +435,104 @@ os.close(fd)
         op: String,
         tcode: String,
         operand1: String? = null,
-        operand2: String? = null
+        operand2: String? = null,
+        onProgress: ((scanned: Int, found: Int) -> Unit)? = null
     ): List<Pair<Long, ByteArray>> = withContext(Dispatchers.IO) {
         if (items.isEmpty()) return@withContext emptyList()
         val allResults = mutableListOf<Pair<Long, ByteArray>>()
-        // Batch items to keep script / command size under ~1 MB
-        val batchSize = if (pythonAvailable) 20_000 else 5_000
+        // Use native readbatch + Kotlin comparison — much faster than Python os.pread loop
+        val batchSize = 5_000
+        var processed = 0
 
-        if (pythonAvailable) {
-            val fmt = when (tcode) {
-                "u1" -> "<B"; "i1" -> "<b"
-                "u2" -> "<H"; "i2" -> "<h"
-                "u4" -> "<I"; "i4" -> "<i"
-                "u8" -> "<Q"; "i8" -> "<q"
-                "f4" -> "<f"; "f8" -> "<d"
-                else -> ""
-            }
-            val op1Py = when {
-                operand1 == null -> "None"
-                fmt in listOf("<f", "<d") -> "float($operand1)"
-                else -> "int($operand1)"
-            }
-            val op2Py = when {
-                operand2 == null -> "None"
-                fmt in listOf("<f", "<d") -> "float($operand2)"
-                else -> "int($operand2)"
-            }
-            for (batch in items.chunked(batchSize)) {
-                val itemsList = batch.joinToString(",") { "(${it.first},'${it.second.joinToString("") { b -> "%02x".format(b) }}',${it.third})" }
-                val scriptBody = """
-import os, struct
-fd = os.open('/proc/$pid/mem', os.O_RDONLY)
-fmt = '$fmt'
-op = '$op'
-op1 = $op1Py
-op2 = $op2Py
-eps = 1e-4
-for addr, prev_hex, n in [$itemsList]:
-    try:
-        d = os.pread(fd, n, addr)
-        if len(d) != n: continue
-        old = bytes.fromhex(prev_hex)
-        if fmt:
-            v_new = struct.unpack(fmt, d)[0]
-            v_old = struct.unpack(fmt, old)[0]
-            is_float = fmt in ('<f', '<d')
-        else:
-            v_new = d
-            v_old = old
-            is_float = False
-        keep = False
-        if op == 'CHANGED':
-            keep = (d != old)
-        elif op == 'UNCHANGED':
-            keep = (d == old)
-        elif op == 'INCREASED':
-            keep = v_new > v_old
-        elif op == 'DECREASED':
-            keep = v_new < v_old
-        elif op == 'INCREASED_BY':
-            delta = v_new - v_old
-            if is_float: keep = abs(delta - op1) <= eps * max(1.0, abs(op1))
-            else: keep = delta == op1
-        elif op == 'DECREASED_BY':
-            delta = v_old - v_new
-            if is_float: keep = abs(delta - op1) <= eps * max(1.0, abs(op1))
-            else: keep = delta == op1
-        elif op == 'BETWEEN':
-            keep = (op1 <= v_new <= op2)
-        elif op == 'EXACT':
-            if is_float: keep = abs(v_new - op1) <= eps * max(1.0, abs(op1))
-            else: keep = (v_new == op1)
-        if keep:
-            print(str(addr) + ':' + d.hex())
-    except Exception:
-        pass
-os.close(fd)
-""".trimIndent()
-                val res = runPythonScript(scriptBody, tag = "cmp_$pid")
-                res.stdout.mapNotNull { line ->
-                    val parts = line.split(":", limit = 2)
-                    if (parts.size != 2) return@mapNotNull null
-                    val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
-                    val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
-                    addr to bytes
-                }.also { allResults.addAll(it) }
-            }
-        } else {
-            // Native fallback: readbatch then compare in Kotlin
-            for (batch in items.chunked(batchSize)) {
-                val reqArgs = batch.map { "${it.first}:${it.third}" }
-                val nativeArgs = mutableListOf(pid.toString())
-                nativeArgs.addAll(reqArgs)
-                val res = runNativeCommand("readbatch", *nativeArgs.toTypedArray())
-                // readbatch returns idx:hex, not addr:hex
-                val addrByIndex: Map<String, Long> = batch.withIndex().associate { it.index.toString() to it.value.first }
-                val bytesMap = res.stdout.mapNotNull { line ->
-                    val parts = line.split(":", limit = 2)
-                    if (parts.size != 2) return@mapNotNull null
-                    val addr = addrByIndex[parts[0]] ?: return@mapNotNull null
-                    val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
-                    addr to bytes
-                }.toMap()
+        for (batch in items.chunked(batchSize)) {
+            val reqArgs = batch.map { "${it.first}:${it.third}" }
+            val nativeArgs = mutableListOf(pid.toString())
+            nativeArgs.addAll(reqArgs)
+            val res = runNativeCommand("readbatch", *nativeArgs.toTypedArray())
+            // readbatch returns idx:hex, not addr:hex
+            val addrByIndex: Map<String, Long> = batch.withIndex().associate { it.index.toString() to it.value.first }
+            val bytesMap = res.stdout.mapNotNull { line ->
+                val parts = line.split(":", limit = 2)
+                if (parts.size != 2) return@mapNotNull null
+                val addr = addrByIndex[parts[0]] ?: return@mapNotNull null
+                val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
+                addr to bytes
+            }.toMap()
 
-                for ((addr, prevBytes, size) in batch) {
-                    val newBytes = bytesMap[addr] ?: continue
-                    if (newBytes.size != size) continue
-                    val keep = when (op) {
-                        "CHANGED" -> !newBytes.contentEquals(prevBytes)
-                        "UNCHANGED" -> newBytes.contentEquals(prevBytes)
-                        else -> {
-                            // For numeric comparisons, decode bytes
-                            val vNew = decodeBytes(newBytes, tcode)
-                            val vOld = decodeBytes(prevBytes, tcode)
-                            if (vNew == null || vOld == null) false
-                            else compareNumeric(op, vNew, vOld, operand1, operand2, tcode)
-                        }
-                    }
-                    if (keep) allResults.add(addr to newBytes)
+            for ((addr, prevBytes, size) in batch) {
+                val newBytes = bytesMap[addr] ?: continue
+                if (newBytes.size != size) continue
+                val keep = when (op) {
+                    "CHANGED" -> !newBytes.contentEquals(prevBytes)
+                    "UNCHANGED" -> newBytes.contentEquals(prevBytes)
+                    else -> compareNumeric(op, newBytes, prevBytes, operand1, operand2, tcode)
                 }
+                if (keep) allResults.add(addr to newBytes)
             }
+            processed += batch.size
+            onProgress?.invoke(processed, allResults.size)
         }
         allResults
     }
 
-    private fun decodeBytes(bytes: ByteArray, tcode: String): Double? {
+    private fun decodeBytesLong(bytes: ByteArray, tcode: String): Long? {
         return try {
             val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
             when (tcode) {
-                "u1", "i1" -> buffer.get().toDouble()
-                "u2", "i2" -> buffer.getShort().toDouble()
-                "u4", "i4" -> buffer.getInt().toDouble()
-                "u8", "i8" -> buffer.getLong().toDouble()
+                "u1" -> buffer.get().toLong() and 0xFFL
+                "i1" -> buffer.get().toLong()
+                "u2" -> buffer.getShort().toLong() and 0xFFFFL
+                "i2" -> buffer.getShort().toLong()
+                "u4" -> buffer.getInt().toLong() and 0xFFFFFFFFL
+                "i4" -> buffer.getInt().toLong()
+                "u8", "i8" -> buffer.getLong()
+                else -> null
+            }
+        } catch (_: Exception) { null }
+    }
+
+    private fun decodeBytesDouble(bytes: ByteArray, tcode: String): Double? {
+        return try {
+            val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            when (tcode) {
                 "f4" -> buffer.getFloat().toDouble()
                 "f8" -> buffer.getDouble()
                 else -> null
             }
-        } catch (_: Exception) {
-            null
-        }
+        } catch (_: Exception) { null }
     }
 
-    private fun compareNumeric(op: String, vNew: Double, vOld: Double, operand1: String?, operand2: String?, tcode: String): Boolean {
-        val op1 = operand1?.toDoubleOrNull()
-        val op2 = operand2?.toDoubleOrNull()
-        val eps = 1e-4
+    private fun compareNumeric(op: String, newBytes: ByteArray, oldBytes: ByteArray, operand1: String?, operand2: String?, tcode: String): Boolean {
         val isFloat = tcode in listOf("f4", "f8")
-        return when (op) {
-            "INCREASED" -> vNew > vOld
-            "DECREASED" -> vNew < vOld
-            "INCREASED_BY" -> if (op1 != null && isFloat) kotlin.math.abs(vNew - vOld - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1)) else vNew - vOld == op1
-            "DECREASED_BY" -> if (op1 != null && isFloat) kotlin.math.abs(vOld - vNew - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1)) else vOld - vNew == op1
-            "BETWEEN" -> op1 != null && op2 != null && vNew >= op1 && vNew <= op2
-            "EXACT" -> if (op1 != null && isFloat) kotlin.math.abs(vNew - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1)) else vNew == op1
-            else -> false
+        val eps = 1e-4
+        return if (isFloat) {
+            val vNew = decodeBytesDouble(newBytes, tcode) ?: return false
+            val vOld = decodeBytesDouble(oldBytes, tcode) ?: return false
+            val op1 = operand1?.toDoubleOrNull()
+            val op2 = operand2?.toDoubleOrNull()
+            when (op) {
+                "INCREASED" -> vNew > vOld
+                "DECREASED" -> vNew < vOld
+                "INCREASED_BY" -> op1 != null && kotlin.math.abs(vNew - vOld - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1))
+                "DECREASED_BY" -> op1 != null && kotlin.math.abs(vOld - vNew - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1))
+                "BETWEEN" -> op1 != null && op2 != null && vNew >= op1 && vNew <= op2
+                "EXACT" -> op1 != null && kotlin.math.abs(vNew - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1))
+                else -> false
+            }
+        } else {
+            val vNew = decodeBytesLong(newBytes, tcode) ?: return false
+            val vOld = decodeBytesLong(oldBytes, tcode) ?: return false
+            val op1 = operand1?.toLongOrNull() ?: operand1?.toDoubleOrNull()?.toLong()
+            val op2 = operand2?.toLongOrNull() ?: operand2?.toDoubleOrNull()?.toLong()
+            when (op) {
+                "INCREASED" -> vNew > vOld
+                "DECREASED" -> vNew < vOld
+                "INCREASED_BY" -> op1 != null && (vNew - vOld) == op1
+                "DECREASED_BY" -> op1 != null && (vOld - vNew) == op1
+                "BETWEEN" -> op1 != null && op2 != null && vNew >= op1 && vNew <= op2
+                "EXACT" -> op1 != null && vNew == op1
+                else -> false
+            }
         }
     }
 

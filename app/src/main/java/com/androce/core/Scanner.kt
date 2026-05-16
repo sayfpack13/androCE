@@ -102,9 +102,13 @@ object Scanner {
         val survivorMap = survivors.toMap()
         val out = previousResults.mapNotNull { prev ->
             val newBytes = survivorMap[prev.address] ?: return@mapNotNull null
-            prev.previousBytes = prev.currentBytes.copyOf()
-            prev.currentBytes = newBytes
-            prev
+            // Reset baseline to the refined scan result — deep-copy to avoid shared references
+            prev.copy(
+                previousBytes = newBytes.copyOf(),
+                currentBytes = newBytes.copyOf(),
+                changeDirection = ChangeDirection.NONE,
+                deltaDisplay = ""
+            )
         }
         onProgress?.invoke(ScanProgress(previousResults.size, previousResults.size, out.size))
         AppLogger.d(TAG, "refinedScan kept=${out.size}/${previousResults.size}")
@@ -127,14 +131,26 @@ object Scanner {
         if (previousResults.isEmpty()) return@withContext emptyList()
         onProgress?.invoke(ScanProgress(0, previousResults.size, 0))
         val tcode = tcodeFor(valueType)
-        val items = previousResults.map { Triple(it.address, it.currentBytes, it.currentBytes.size) }
-        val survivors = MemoryReader.compareBatch(pid, items, op.name, tcode, operand1, operand2)
+        // Use previousBytes (scan baseline) as old value so INCREASED_BY/DECREASED_BY
+        // compares against the same baseline the user sees in the delta display.
+        val items = previousResults.map { r ->
+            Triple(r.address, r.previousBytes, r.currentBytes.size)
+        }
+        val survivors = MemoryReader.compareBatch(
+            pid, items, op.name, tcode, operand1, operand2
+        ) { scanned, found ->
+            onProgress?.invoke(ScanProgress(scanned, previousResults.size, found))
+        }
         val map = survivors.toMap()
         val out = previousResults.mapNotNull { prev ->
             val newBytes = map[prev.address] ?: return@mapNotNull null
-            prev.previousBytes = prev.currentBytes.copyOf()
-            prev.currentBytes = newBytes
-            prev
+            // Deep-copy to avoid shared ByteArray references
+            prev.copy(
+                previousBytes = newBytes.copyOf(),
+                currentBytes = newBytes.copyOf(),
+                changeDirection = ChangeDirection.NONE,
+                deltaDisplay = ""
+            )
         }
         onProgress?.invoke(ScanProgress(previousResults.size, previousResults.size, out.size))
         AppLogger.d(TAG, "comparisonScan op=${op.name} kept=${out.size}/${previousResults.size}")
@@ -172,39 +188,40 @@ object Scanner {
             val reqs = results.map { it.address to it.currentBytes.size }
             val bytesList = MemoryReader.readBytesBatch(pid, reqs)
             results.mapIndexed { idx, r ->
-                val b = bytesList[idx]
-                if (b == null) {
-                    r.copy(previousBytes = r.currentBytes.copyOf())
-                } else {
-                    val oldBytes = r.currentBytes.copyOf()
-                    var dir = ChangeDirection.NONE
-                    var delta = ""
-                    if (!b.contentEquals(oldBytes)) {
-                        val cmp = compareNumericValues(r.valueType, oldBytes, b)
-                        dir = when {
-                            cmp > 0 -> ChangeDirection.UP
-                            cmp < 0 -> ChangeDirection.DOWN
-                            else -> ChangeDirection.NONE
-                        }
-                        if (cmp != 0) {
-                            val d = numericDelta(r.valueType, oldBytes, b)
-                            if (d != null) delta = (if (cmp > 0) "+" else "") + d
-                        }
-                    }
-                    r.copy(
-                        previousBytes = oldBytes,
-                        currentBytes = b,
-                        changeDirection = dir,
-                        deltaDisplay = delta
-                    )
+                val raw = bytesList[idx]
+                if (raw == null) {
+                    return@mapIndexed r.copy(changeDirection = ChangeDirection.NONE, deltaDisplay = "")
                 }
+                val bytes: ByteArray = raw
+                // previousBytes is the scan baseline — set at scan time, never overwritten by refresh
+                val baseline = r.previousBytes
+                var dir = ChangeDirection.NONE
+                var delta = ""
+                if (!bytes.contentEquals(baseline)) {
+                    val cmp = compareNumericValues(r.valueType, baseline, bytes)
+                    dir = when {
+                        cmp > 0 -> ChangeDirection.UP
+                        cmp < 0 -> ChangeDirection.DOWN
+                        else -> ChangeDirection.NONE
+                    }
+                    if (cmp != 0) {
+                        val d = numericDelta(r.valueType, baseline, bytes)
+                        if (d != null) delta = (if (cmp > 0) "+" else "") + d
+                    }
+                }
+                r.copy(
+                    currentBytes = bytes,
+                    // previousBytes stays as scan baseline
+                    changeDirection = dir,
+                    deltaDisplay = delta
+                )
             }
         }
 
     private fun compareNumericValues(type: ValueType, old: ByteArray, new: ByteArray): Int {
         return try {
             when (type) {
-                ValueType.BYTE1 -> new[0].compareTo(old[0])
+                ValueType.BYTE1 -> (new[0].toInt() and 0xFF).compareTo(old[0].toInt() and 0xFF)
                 ValueType.BYTE2 -> bytesToShort(new).compareTo(bytesToShort(old))
                 ValueType.BYTE4, ValueType.XOR4 -> bytesToInt(new).compareTo(bytesToInt(old))
                 ValueType.BYTE8, ValueType.XOR8 -> bytesToLong(new).compareTo(bytesToLong(old))
@@ -220,7 +237,7 @@ object Scanner {
     private fun numericDelta(type: ValueType, old: ByteArray, new: ByteArray): String? {
         return try {
             when (type) {
-                ValueType.BYTE1 -> (new[0].toInt() - old[0].toInt()).toString()
+                ValueType.BYTE1 -> ((new[0].toInt() and 0xFF) - (old[0].toInt() and 0xFF)).toString()
                 ValueType.BYTE2 -> (bytesToShort(new) - bytesToShort(old)).toString()
                 ValueType.BYTE4, ValueType.XOR4 -> (bytesToInt(new) - bytesToInt(old)).toString()
                 ValueType.BYTE8, ValueType.XOR8 -> (bytesToLong(new) - bytesToLong(old)).toString()
@@ -236,8 +253,8 @@ object Scanner {
     }
 
     private fun tcodeFor(t: ValueType): String = when (t) {
-        ValueType.BYTE1 -> "i1"
-        ValueType.BYTE2 -> "i2"
+        ValueType.BYTE1 -> "u1"
+        ValueType.BYTE2 -> "u2"
         ValueType.BYTE4 -> "i4"
         ValueType.BYTE8 -> "i8"
         ValueType.FLOAT -> "f4"

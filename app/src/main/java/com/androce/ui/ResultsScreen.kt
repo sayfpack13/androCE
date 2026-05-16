@@ -92,6 +92,7 @@ import com.androce.ui.theme.Primary
 import com.androce.ui.theme.SurfaceHigh
 import com.androce.ui.theme.SurfaceVariant
 import com.androce.ui.theme.Warning
+import com.androce.viewmodel.ScanState
 import com.androce.viewmodel.ScanViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -103,6 +104,7 @@ fun ResultsScreen(
     onBack: () -> Unit
 ) {
     val results by viewModel.results.collectAsState()
+    val scanState by viewModel.scanState.collectAsState()
     val selectedCount = results.count { it.selected }
     val allSelected = results.isNotEmpty() && results.all { it.selected }
     val snackBarHostState = remember { SnackbarHostState() }
@@ -117,15 +119,14 @@ fun ResultsScreen(
     var saveName by rememberSaveable { mutableStateOf("") }
     var showLoadDialog by rememberSaveable { mutableStateOf(false) }
     var tableNames by remember { mutableStateOf(viewModel.listSavedTables()) }
-    var autoRefresh by rememberSaveable { mutableStateOf(false) }
-
-    // Auto-refresh timer: every 2 seconds when enabled and results exist
-    LaunchedEffect(autoRefresh) {
-        if (!autoRefresh) return@LaunchedEffect
+    // Auto-refresh timer: always enabled when results exist and no scan is running
+    val isScanning = scanState is ScanState.Scanning
+    LaunchedEffect(results.isEmpty(), isScanning) {
+        if (results.isEmpty() || isScanning) return@LaunchedEffect
         while (true) {
             delay(2000)
-            if (!autoRefresh) break
-            if (results.isNotEmpty()) viewModel.refreshValues()
+            if (results.isEmpty() || scanState is ScanState.Scanning) break
+            viewModel.refreshValues()
         }
     }
 
@@ -152,16 +153,6 @@ fun ResultsScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { autoRefresh = !autoRefresh }) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            contentDescription = if (autoRefresh) "Auto-refresh on" else "Auto-refresh off",
-                            tint = if (autoRefresh) AccentGreen else Primary
-                        )
-                    }
-                    IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.refreshValues() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary)
-                    }
                     IconButton(onClick = { viewModel.selectAll(!allSelected) }) {
                         Icon(
                             if (allSelected) Icons.Default.Clear else Icons.Default.SelectAll,

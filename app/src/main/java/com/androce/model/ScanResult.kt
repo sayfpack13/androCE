@@ -5,19 +5,19 @@ enum class ChangeDirection { NONE, UP, DOWN }
 data class ScanResult(
     val address: Long,
     val valueType: ValueType,
-    var currentBytes: ByteArray,
-    var previousBytes: ByteArray? = null,
-    var frozen: Boolean = false,
-    var selected: Boolean = false,
-    var changeDirection: ChangeDirection = ChangeDirection.NONE,
-    var deltaDisplay: String = ""
+    val currentBytes: ByteArray,
+    val previousBytes: ByteArray = currentBytes.copyOf(),
+    val frozen: Boolean = false,
+    val selected: Boolean = false,
+    val changeDirection: ChangeDirection = ChangeDirection.NONE,
+    val deltaDisplay: String = ""
 ) {
     val addressHex: String get() = "0x%X".format(address)
 
-    fun clearChange() {
-        changeDirection = ChangeDirection.NONE
+    fun clearChange(): ScanResult = copy(
+        changeDirection = ChangeDirection.NONE,
         deltaDisplay = ""
-    }
+    )
 
     fun displayValue(): String = when (valueType) {
         ValueType.BYTE1 -> currentBytes.getOrElse(0) { 0 }.toString()
@@ -48,6 +48,7 @@ data class ScanResult(
                 && changeDirection == other.changeDirection
                 && deltaDisplay == other.deltaDisplay
                 && currentBytes.contentEquals(other.currentBytes)
+                && previousBytes.contentEquals(other.previousBytes)
     }
 
     override fun hashCode(): Int {
@@ -58,6 +59,7 @@ data class ScanResult(
         result = 31 * result + changeDirection.hashCode()
         result = 31 * result + deltaDisplay.hashCode()
         result = 31 * result + currentBytes.contentHashCode()
+        result = 31 * result + previousBytes.contentHashCode()
         return result
     }
 }

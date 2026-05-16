@@ -6,6 +6,8 @@ gradle-app.setting
 !gradle-wrapper.jar
 .gradletasknamecache
 
+
+
 # Android Studio / IntelliJ
 *.iml
 .idea/
@@ -27,6 +29,7 @@ local.properties
 *.dex
 
 # Logs
+logs/
 *.log
 
 # OS
