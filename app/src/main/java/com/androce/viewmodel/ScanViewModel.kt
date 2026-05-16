@@ -29,6 +29,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -51,6 +53,7 @@ class ScanViewModel : ViewModel() {
                 // Invalidate everything tied to the old PID
                 scanJob?.cancel()
                 _regions.value = emptyList()
+                regionsPid = null
                 _results.value = emptyList()
                 _scanState.value = ScanState.Idle
                 Scanner.paused = false
@@ -79,6 +82,8 @@ class ScanViewModel : ViewModel() {
     val isPaused: StateFlow<Boolean> = _isPaused
 
     private var scanJob: Job? = null
+    private val regionLoadMutex = Mutex()
+    private var regionsPid: Int? = null
     private var freezeService: FreezeService? = null
     private var freezeServiceBound = false
 
@@ -112,7 +117,12 @@ class ScanViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val regions = MemoryReader.getReadableRegions(pid)
-                withContext(Dispatchers.Main) { _regions.value = regions }
+                withContext(Dispatchers.Main) {
+                    if (_selectedProcess?.pid == pid) {
+                        _regions.value = regions
+                        regionsPid = pid
+                    }
+                }
             } catch (_: Exception) {
                 withContext(Dispatchers.Main) { _regions.value = emptyList() }
             }
@@ -121,10 +131,20 @@ class ScanViewModel : ViewModel() {
 
     private suspend fun getOrLoadRegions(pid: Int): List<MemoryRegion> {
         val existing = _regions.value
-        if (existing.isNotEmpty()) return existing
-        val loaded = MemoryReader.getReadableRegions(pid)
-        withContext(Dispatchers.Main) { _regions.value = loaded }
-        return loaded
+        if (existing.isNotEmpty() && regionsPid == pid) return existing
+        return regionLoadMutex.withLock {
+            val cached = _regions.value
+            if (cached.isNotEmpty() && regionsPid == pid) return@withLock cached
+
+            val loaded = MemoryReader.getReadableRegions(pid)
+            withContext(Dispatchers.Main) {
+                if (_selectedProcess?.pid == pid) {
+                    _regions.value = loaded
+                    regionsPid = pid
+                }
+            }
+            loaded
+        }
     }
 
     // ---- Scans ----
