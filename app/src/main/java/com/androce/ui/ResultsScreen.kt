@@ -85,6 +85,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.model.ScanResult
 import com.androce.ui.theme.Accent
+import com.androce.core.AppPrefs
 import com.androce.ui.theme.AccentGreen
 import com.androce.ui.theme.Primary
 import com.androce.ui.theme.SurfaceHigh
@@ -120,10 +121,11 @@ fun ResultsScreen(
     var tableNames by remember { mutableStateOf(viewModel.listSavedTables()) }
     // Auto-refresh timer: always enabled when results exist and no scan is running
     val isScanning = scanState is ScanState.Scanning
-    LaunchedEffect(results.isEmpty(), isScanning) {
-        if (results.isEmpty() || isScanning) return@LaunchedEffect
+    val refreshInterval = AppPrefs.autoRefreshIntervalMs
+    LaunchedEffect(results.isEmpty(), isScanning, refreshInterval) {
+        if (results.isEmpty() || isScanning || refreshInterval <= 0L) return@LaunchedEffect
         while (true) {
-            delay(2000)
+            delay(refreshInterval)
             if (results.isEmpty() || scanState is ScanState.Scanning) break
             viewModel.refreshValues()
         }

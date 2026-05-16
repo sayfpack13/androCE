@@ -15,6 +15,9 @@ object MemoryReader {
     private var nativeHelperPath: String = ""
     private var pythonAvailable: Boolean = true
 
+    val isPythonAvailable: Boolean get() = pythonAvailable
+    val isNativeHelperReady: Boolean get() = nativeHelperPath.isNotEmpty()
+
     fun init(context: Context) {
         var dest = File(context.filesDir, "memscan")
         try {

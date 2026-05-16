@@ -7,6 +7,7 @@ import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.androce.core.AppPrefs
 import com.androce.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -81,7 +82,7 @@ class FreezeService : Service() {
                     val writes = entries.map { it.address to it.bytes }
                     MemoryWriter.writeBytesMany(pid, writes)
                 }
-                delay(FREEZE_INTERVAL_MS)
+                delay(AppPrefs.freezeIntervalMs)
             }
         }
     }
