@@ -327,6 +327,8 @@ private fun StatusTab(
         SettingsCard {
             SectionLabel("Tips")
             Spacer(Modifier.height(8.dp))
+            TipRow("Python engine finds more results — it reads fresh pages even when memory is swapped or compressed")
+            TipRow("Native C may miss values on devices with MemFusion/zRAM due to stale page cache")
             TipRow("Disable MemFusion/zRAM and reboot before scanning")
             TipRow("Set SELinux to Permissive for best results")
             TipRow("Use Heap/Stack/Anon filter for faster scans")
