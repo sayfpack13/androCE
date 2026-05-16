@@ -1,14 +1,11 @@
 package com.androce.ui
 
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
@@ -66,6 +63,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -105,8 +103,9 @@ fun ResultsScreen(
 ) {
     val results by viewModel.results.collectAsState()
     val scanState by viewModel.scanState.collectAsState()
-    val selectedCount = results.count { it.selected }
-    val allSelected = results.isNotEmpty() && results.all { it.selected }
+    val selectedCount by remember { derivedStateOf { results.count { it.selected } } }
+    val allSelected by remember { derivedStateOf { results.isNotEmpty() && results.all { it.selected } } }
+    val selectedAddresses by remember { derivedStateOf { results.filter { it.selected }.map { it.address } } }
     val snackBarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
@@ -137,14 +136,8 @@ fun ResultsScreen(
                 title = {
                     Column {
                         Text("Results", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        AnimatedContent(
-                            targetState = selectedCount to results.size,
-                            transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) },
-                            label = "count"
-                        ) { (sel, total) ->
-                            val subtitle = if (sel > 0) "$sel of $total selected" else "$total address${if (total != 1) "es" else ""}"
-                            Text(subtitle, color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                        }
+                        val subtitle = if (selectedCount > 0) "$selectedCount of ${results.size} selected" else "${results.size} address${if (results.size != 1) "es" else ""}"
+                        Text(subtitle, color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                     }
                 },
                 navigationIcon = {
@@ -285,8 +278,7 @@ fun ResultsScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val addresses = results.filter { it.selected }.map { it.address }
-                    viewModel.writeBulk(addresses, bulkWriteValue)
+                    viewModel.writeBulk(selectedAddresses, bulkWriteValue)
                     showBulkWriteDialog = false
                     bulkWriteValue = ""
                 }) { Text("Write", color = Primary) }
@@ -428,7 +420,6 @@ private fun ResultRow(
                 onLongClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onCopyAddress() }
             )
             .padding(horizontal = 12.dp, vertical = 10.dp)
-            .animateContentSize()
     ) {
         // Top row: Address + Type chip + Action buttons
         Row(

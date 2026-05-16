@@ -12,14 +12,17 @@ data class ScanResult(
     val changeDirection: ChangeDirection = ChangeDirection.NONE,
     val deltaDisplay: String = ""
 ) {
-    val addressHex: String get() = "0x%X".format(address)
+    val addressHex: String = "0x%X".format(address)
+    private var cachedDisplayValue: String? = null
 
-    fun clearChange(): ScanResult = copy(
-        changeDirection = ChangeDirection.NONE,
-        deltaDisplay = ""
-    )
+    fun displayValue(): String {
+        cachedDisplayValue?.let { return it }
+        val value = computeDisplayValue()
+        cachedDisplayValue = value
+        return value
+    }
 
-    fun displayValue(): String = when (valueType) {
+    private fun computeDisplayValue(): String = when (valueType) {
         ValueType.BYTE1 -> currentBytes.getOrElse(0) { 0 }.toString()
         ValueType.BYTE2 -> bytesToShort(currentBytes).toString()
         ValueType.BYTE4 -> bytesToInt(currentBytes).toString()
@@ -37,6 +40,11 @@ data class ScanResult(
         ValueType.XOR8 -> bytesToLong(currentBytes).toString()
         ValueType.ALL -> "ALL"
     }
+
+    fun clearChange(): ScanResult = copy(
+        changeDirection = ChangeDirection.NONE,
+        deltaDisplay = ""
+    )
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

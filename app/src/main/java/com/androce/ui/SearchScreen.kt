@@ -459,8 +459,8 @@ private fun SectionLabel(text: String) {
 private fun ValueTypeDropdown(selected: ValueType, onSelect: (ValueType) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
-    val grouped = ValueType.entries.groupBy { it.category }
-    val categoryOrder = listOf(ValueTypeCategory.INTEGER, ValueTypeCategory.FLOAT, ValueTypeCategory.TEXT, ValueTypeCategory.SPECIAL)
+    val grouped = remember { ValueType.entries.groupBy { it.category } }
+    val categoryOrder = remember { listOf(ValueTypeCategory.INTEGER, ValueTypeCategory.FLOAT, ValueTypeCategory.TEXT, ValueTypeCategory.SPECIAL) }
 
     ExposedDropdownMenuBox(
         expanded = expanded,

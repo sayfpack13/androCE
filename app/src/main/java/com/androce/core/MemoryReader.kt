@@ -348,78 +348,27 @@ os.close(fd)
         wildcard: Byte? = null
     ): List<Pair<Long, ByteArray>> = withContext(Dispatchers.IO) {
         if (addresses.isEmpty()) return@withContext emptyList()
-        val patHex = pattern.joinToString("") { "%02x".format(it) }
         val allResults = mutableListOf<Pair<Long, ByteArray>>()
-        // Batch addresses to keep script / command size under ~1 MB
-        val batchSize = if (pythonAvailable) 50_000 else 10_000
+        val batchSize = 10_000
         for (batch in addresses.chunked(batchSize)) {
-            val res = if (pythonAvailable) {
-                val addrList = batch.joinToString(",")
-                val scriptBody = if (wildcard == null) {
-                    """
-import os
-fd = os.open('/proc/$pid/mem', os.O_RDONLY)
-pat = bytes.fromhex('$patHex')
-n = len(pat)
-for addr in [$addrList]:
-    try:
-        d = os.pread(fd, n, addr)
-        if len(d) == n and d == pat:
-            print(str(addr) + ':' + d.hex())
-    except Exception:
-        pass
-os.close(fd)
-""".trimIndent()
+            val reqs = batch.map { it to pattern.size }
+            val bytesList = readBytesBatch(pid, reqs)
+            var sampleLogged = false
+            batch.forEachIndexed { idx, addr ->
+                val bytes = bytesList[idx] ?: return@forEachIndexed
+                if (bytes.size != pattern.size) return@forEachIndexed
+                val match = if (wildcard != null) {
+                    bytes.indices.all { j -> pattern[j] == wildcard || bytes[j] == pattern[j] }
                 } else {
-                    val wildcardHex = wildcard?.let { "%02x".format(it) } ?: ""
-                    """
-import os
-fd = os.open('/proc/$pid/mem', os.O_RDONLY)
-pat = bytes.fromhex('$patHex')
-wc = bytes.fromhex('$wildcardHex')[0]
-n = len(pat)
-for addr in [$addrList]:
-    try:
-        d = os.pread(fd, n, addr)
-        if len(d) == n and all(pat[j] == wc or d[j] == pat[j] for j in range(n)):
-            print(str(addr) + ':' + d.hex())
-    except Exception:
-        pass
-os.close(fd)
-""".trimIndent()
+                    bytes.contentEquals(pattern)
                 }
-                runPythonScript(scriptBody, tag = "refine_$pid")
-            } else {
-                // Native: readbatch then filter in Kotlin
-                val reqArgs = batch.map { "${it}:${pattern.size}" }
-                val nativeArgs = mutableListOf(pid.toString())
-                nativeArgs.addAll(reqArgs)
-                runNativeCommand("readbatch", *nativeArgs.toTypedArray())
+                if (match) {
+                    allResults.add(addr to bytes)
+                } else if (!sampleLogged && allResults.isEmpty()) {
+                    AppLogger.d(TAG, "refinedScanBatch sample mismatch: addr=0x${"%X".format(addr)} read=${bytes.joinToString("") { "%02x".format(it) }} pattern=${pattern.joinToString("") { "%02x".format(it) }}")
+                    sampleLogged = true
+                }
             }
-            // Build address map for native fallback (readbatch returns idx:hex, not addr:hex)
-            val addrByIndex = if (!pythonAvailable && batch.isNotEmpty()) {
-                batch.withIndex().associate { it.index.toString() to it.value }
-            } else null
-            res.stdout.mapNotNull { line ->
-                val parts = line.split(":", limit = 2)
-                if (parts.size != 2) return@mapNotNull null
-                val addr = if (addrByIndex != null) {
-                    addrByIndex[parts[0]] ?: return@mapNotNull null
-                } else {
-                    parts[0].toLongOrNull() ?: return@mapNotNull null
-                }
-                val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
-                if (bytes.size != pattern.size) return@mapNotNull null
-                if (wildcard != null) {
-                    val match = bytes.indices.all { j ->
-                        pattern[j] == wildcard || bytes[j] == pattern[j]
-                    }
-                    if (!match) return@mapNotNull null
-                } else {
-                    if (!bytes.contentEquals(pattern)) return@mapNotNull null
-                }
-                addr to bytes
-            }.also { allResults.addAll(it) }
         }
         allResults
     }
@@ -440,27 +389,16 @@ os.close(fd)
     ): List<Pair<Long, ByteArray>> = withContext(Dispatchers.IO) {
         if (items.isEmpty()) return@withContext emptyList()
         val allResults = mutableListOf<Pair<Long, ByteArray>>()
-        // Use native readbatch + Kotlin comparison — much faster than Python os.pread loop
         val batchSize = 5_000
         var processed = 0
 
         for (batch in items.chunked(batchSize)) {
-            val reqArgs = batch.map { "${it.first}:${it.third}" }
-            val nativeArgs = mutableListOf(pid.toString())
-            nativeArgs.addAll(reqArgs)
-            val res = runNativeCommand("readbatch", *nativeArgs.toTypedArray())
-            // readbatch returns idx:hex, not addr:hex
-            val addrByIndex: Map<String, Long> = batch.withIndex().associate { it.index.toString() to it.value.first }
-            val bytesMap = res.stdout.mapNotNull { line ->
-                val parts = line.split(":", limit = 2)
-                if (parts.size != 2) return@mapNotNull null
-                val addr = addrByIndex[parts[0]] ?: return@mapNotNull null
-                val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
-                addr to bytes
-            }.toMap()
+            val reqs = batch.map { it.first to it.third }
+            val bytesList = readBytesBatch(pid, reqs)
 
-            for ((addr, prevBytes, size) in batch) {
-                val newBytes = bytesMap[addr] ?: continue
+            for ((idx, triple) in batch.withIndex()) {
+                val (addr, prevBytes, size) = triple
+                val newBytes = bytesList[idx] ?: continue
                 if (newBytes.size != size) continue
                 val keep = when (op) {
                     "CHANGED" -> !newBytes.contentEquals(prevBytes)

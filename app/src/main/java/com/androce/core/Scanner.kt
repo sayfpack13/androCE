@@ -96,6 +96,7 @@ object Scanner {
         onProgress: ((ScanProgress) -> Unit)? = null
     ): List<ScanResult> = withContext(Dispatchers.IO) {
         if (previousResults.isEmpty()) return@withContext emptyList()
+        AppLogger.d(TAG, "refinedScan: pid=$pid count=${previousResults.size} pattern=${pattern.joinToString(" ") { "%02x".format(it) }} wildcard=${wildcard?.let { "%02x".format(it) }}")
         onProgress?.invoke(ScanProgress(0, previousResults.size, 0))
         val addrs = previousResults.map { it.address }
         val survivors = MemoryReader.refinedScanBatch(pid, addrs, pattern, wildcard)

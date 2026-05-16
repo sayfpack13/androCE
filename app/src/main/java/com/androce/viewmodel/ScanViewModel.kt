@@ -527,6 +527,7 @@ class ScanViewModel : ViewModel() {
         scanJob?.cancel()
         scanJob = viewModelScope.launch(Dispatchers.IO) {
             try {
+                AppLogger.d("ScanViewModel", "refinedScan: input='$searchInput' type=$selectedValueType count=${previous.size}")
                 val found = if (selectedValueType == ValueType.STRING) {
                     // Refined scan for both UTF-8 and UTF-16 patterns
                     val utf8Pattern = searchInput.toByteArray(Charsets.UTF_8)
@@ -614,6 +615,7 @@ class ScanViewModel : ViewModel() {
         if (op == ScanComparison.BETWEEN && operand2 == null) {
             _scanState.value = ScanState.Error("Between requires both min and max values"); return
         }
+        AppLogger.d("ScanViewModel", "comparisonScan: op=${op.name} type=$selectedValueType count=${previous.size} op1=$operand1 op2=$operand2")
 
         if (selectedValueType == ValueType.ALL) {
             scanJob?.cancel()
@@ -742,13 +744,16 @@ class ScanViewModel : ViewModel() {
     }
 
     fun toggleSelected(address: Long) {
-        _results.value = _results.value.map {
-            if (it.address == address) it.copy(selected = !it.selected) else it
-        }
+        val list = _results.value
+        val idx = list.indexOfFirst { it.address == address }
+        if (idx < 0) return
+        _results.value = list.toMutableList().also { it[idx] = it[idx].copy(selected = !it[idx].selected) }
     }
 
     fun selectAll(select: Boolean) {
-        _results.value = _results.value.map { it.copy(selected = select) }
+        val list = _results.value
+        if (list.all { it.selected == select }) return
+        _results.value = list.map { it.copy(selected = select) }
     }
 
     fun removeResult(address: Long) {
