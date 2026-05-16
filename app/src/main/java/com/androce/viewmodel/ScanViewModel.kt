@@ -123,12 +123,20 @@ class ScanViewModel : ViewModel() {
                         regionsPid = pid
                     }
                 }
-            } catch (_: Exception) {
-                withContext(Dispatchers.Main) { _regions.value = emptyList() }
+            } catch (e: Exception) {
+                AppLogger.e("ScanViewModel", "loadRegions failed", e)
+                withContext(Dispatchers.Main) {
+                    _regions.value = emptyList()
+                    regionsPid = null
+                }
             }
         }
     }
 
+    /**
+     * Returns cached readable regions for [pid], or loads them once in a thread-safe way.
+     * Cache is PID-aware and protected with a mutex to prevent duplicate concurrent loads.
+     */
     private suspend fun getOrLoadRegions(pid: Int): List<MemoryRegion> {
         val existing = _regions.value
         if (existing.isNotEmpty() && regionsPid == pid) return existing
@@ -136,14 +144,25 @@ class ScanViewModel : ViewModel() {
             val cached = _regions.value
             if (cached.isNotEmpty() && regionsPid == pid) return@withLock cached
 
-            val loaded = MemoryReader.getReadableRegions(pid)
-            withContext(Dispatchers.Main) {
-                if (_selectedProcess?.pid == pid) {
-                    _regions.value = loaded
-                    regionsPid = pid
+            try {
+                val loaded = MemoryReader.getReadableRegions(pid)
+                withContext(Dispatchers.Main) {
+                    if (_selectedProcess?.pid == pid) {
+                        _regions.value = loaded
+                        regionsPid = pid
+                    }
                 }
+                loaded
+            } catch (e: Exception) {
+                AppLogger.e("ScanViewModel", "getOrLoadRegions failed", e)
+                withContext(Dispatchers.Main) {
+                    if (_selectedProcess?.pid == pid) {
+                        _regions.value = emptyList()
+                        regionsPid = null
+                    }
+                }
+                emptyList()
             }
-            loaded
         }
     }
 
