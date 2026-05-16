@@ -138,21 +138,22 @@ class ScanViewModel : ViewModel() {
      * Cache is PID-aware and protected with a mutex to prevent duplicate concurrent loads.
      */
     private suspend fun getOrLoadRegions(pid: Int): List<MemoryRegion> {
-        val existing = _regions.value
-        if (existing.isNotEmpty() && regionsPid == pid) return existing
         return regionLoadMutex.withLock {
             val cached = _regions.value
             if (cached.isNotEmpty() && regionsPid == pid) return@withLock cached
 
             try {
                 val loaded = MemoryReader.getReadableRegions(pid)
-                withContext(Dispatchers.Main) {
+                val applied = withContext(Dispatchers.Main) {
                     if (_selectedProcess?.pid == pid) {
                         _regions.value = loaded
                         regionsPid = pid
+                        true
+                    } else {
+                        false
                     }
                 }
-                loaded
+                if (applied) loaded else emptyList()
             } catch (e: Exception) {
                 AppLogger.e("ScanViewModel", "getOrLoadRegions failed", e)
                 withContext(Dispatchers.Main) {
