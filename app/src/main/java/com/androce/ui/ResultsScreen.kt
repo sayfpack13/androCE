@@ -91,6 +91,7 @@ import com.androce.ui.theme.Primary
 import com.androce.ui.theme.SurfaceHigh
 import com.androce.ui.theme.SurfaceVariant
 import com.androce.viewmodel.ScanViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -114,6 +115,15 @@ fun ResultsScreen(
     var saveName by rememberSaveable { mutableStateOf("") }
     var showLoadDialog by rememberSaveable { mutableStateOf(false) }
     var tableNames by remember { mutableStateOf(viewModel.listSavedTables()) }
+    var autoRefresh by rememberSaveable { mutableStateOf(false) }
+
+    // Auto-refresh timer: every 2 seconds when enabled and results exist
+    LaunchedEffect(autoRefresh, results.size) {
+        while (autoRefresh && results.isNotEmpty()) {
+            delay(2000)
+            if (autoRefresh) viewModel.refreshValues()
+        }
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackBarHostState) },
@@ -140,6 +150,13 @@ fun ResultsScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { autoRefresh = !autoRefresh }) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = if (autoRefresh) "Auto-refresh on" else "Auto-refresh off",
+                            tint = if (autoRefresh) AccentGreen else Primary
+                        )
+                    }
                     IconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.refreshValues() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary)
                     }
@@ -413,12 +430,32 @@ private fun ResultRow(
                     keyboardActions = KeyboardActions(onDone = { onWrite(editValue); isEditing = false })
                 )
             } else {
-                Text(
-                    text = result.displayValue(),
-                    color = MaterialTheme.colorScheme.onBackground,
-                    fontSize = 13.sp,
-                    fontFamily = FontFamily.Monospace
-                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = result.displayValue(),
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontSize = 13.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    // Change direction badge
+                    if (result.changeDirection != com.androce.model.ChangeDirection.NONE) {
+                        val badgeColor = when (result.changeDirection) {
+                            com.androce.model.ChangeDirection.UP -> AccentGreen
+                            com.androce.model.ChangeDirection.DOWN -> MaterialTheme.colorScheme.error
+                            else -> Color.Transparent
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Box(Modifier.size(7.dp).clip(RoundedCornerShape(4.dp)).background(badgeColor))
+                            Text(
+                                text = result.deltaDisplay,
+                                color = badgeColor,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
             }
         }
 

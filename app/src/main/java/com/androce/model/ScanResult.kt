@@ -1,14 +1,23 @@
 package com.androce.model
 
+enum class ChangeDirection { NONE, UP, DOWN }
+
 data class ScanResult(
     val address: Long,
     val valueType: ValueType,
     var currentBytes: ByteArray,
     var previousBytes: ByteArray? = null,
     var frozen: Boolean = false,
-    var selected: Boolean = false
+    var selected: Boolean = false,
+    var changeDirection: ChangeDirection = ChangeDirection.NONE,
+    var deltaDisplay: String = ""
 ) {
     val addressHex: String get() = "0x%X".format(address)
+
+    fun clearChange() {
+        changeDirection = ChangeDirection.NONE
+        deltaDisplay = ""
+    }
 
     fun displayValue(): String = when (valueType) {
         ValueType.BYTE1 -> currentBytes.getOrElse(0) { 0 }.toString()

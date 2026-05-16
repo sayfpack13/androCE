@@ -424,13 +424,17 @@ private fun ScanTab(
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     // Search input always visible in Scan tab for easy value changes
+                    val inputValid = searchInput.isBlank() || isInputValid(searchInput, selectedType)
                     OutlinedTextField(
                         value = searchInput,
                         onValueChange = onSearchChange,
                         label = { Text(if (results.isEmpty()) "Search value" else "New value to refine") },
                         modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        singleLine = selectedType != ValueType.STRING_UTF8 && selectedType != ValueType.STRING_UTF16,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = keyboardTypeFor(selectedType),
+                            imeAction = ImeAction.Search
+                        ),
                         keyboardActions = KeyboardActions(onSearch = {
                             if (results.isEmpty()) onFirstScan() else onRefinedScan()
                         }),
@@ -442,6 +446,12 @@ private fun ScanTab(
                                 }
                             }
                         },
+                        supportingText = {
+                            if (searchInput.isNotBlank() && !inputValid) {
+                                Text(inputHelperText(selectedType), color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
+                            }
+                        },
+                        isError = searchInput.isNotBlank() && !inputValid,
                         colors = inputColors()
                     )
 
@@ -449,7 +459,7 @@ private fun ScanTab(
                         // No results yet: only First Scan
                         Button(
                             onClick = onFirstScan,
-                            enabled = searchInput.isNotBlank(),
+                            enabled = searchInput.isNotBlank() && inputValid,
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Primary)
                         ) {
@@ -461,7 +471,7 @@ private fun ScanTab(
                         // Results exist: show refined scan + comparison + reset
                         Button(
                             onClick = onRefinedScan,
-                            enabled = searchInput.isNotBlank(),
+                            enabled = searchInput.isNotBlank() && inputValid,
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Accent)
                         ) {
@@ -472,7 +482,7 @@ private fun ScanTab(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Button(
                                 onClick = onFirstScan,
-                                enabled = searchInput.isNotBlank(),
+                                enabled = searchInput.isNotBlank() && inputValid,
                                 modifier = Modifier.weight(1f),
                                 colors = ButtonDefaults.buttonColors(containerColor = Primary)
                             ) {
@@ -786,3 +796,37 @@ fun inputColors() = OutlinedTextFieldDefaults.colors(
     cursorColor = Primary,
     focusedLabelColor = Primary
 )
+
+private fun isInputValid(input: String, type: ValueType): Boolean {
+    if (input.isBlank()) return false
+    return try {
+        when (type) {
+            ValueType.BYTE1 -> input.toInt() in Byte.MIN_VALUE..Byte.MAX_VALUE
+            ValueType.BYTE2 -> input.toInt() in Short.MIN_VALUE..Short.MAX_VALUE
+            ValueType.BYTE4 -> input.toLong() in Int.MIN_VALUE..Int.MAX_VALUE
+            ValueType.BYTE8 -> input.toLongOrNull() != null
+            ValueType.FLOAT -> input.toFloatOrNull() != null
+            ValueType.DOUBLE -> input.toDoubleOrNull() != null
+            ValueType.STRING_UTF8, ValueType.STRING_UTF16 -> true
+            ValueType.BYTE_ARRAY -> input.matches(Regex("^([0-9A-Fa-f]{2} )*[0-9A-Fa-f]{2}$"))
+            ValueType.XOR4 -> input.toLongOrNull() != null
+            ValueType.XOR8 -> input.toLongOrNull() != null
+            ValueType.ALL -> input.toLongOrNull() != null || input.toDoubleOrNull() != null
+        }
+    } catch (_: NumberFormatException) { false }
+}
+
+private fun inputHelperText(type: ValueType): String = when (type) {
+    ValueType.BYTE1 -> "Valid range: -128 to 127"
+    ValueType.BYTE2 -> "Valid range: -32768 to 32767"
+    ValueType.BYTE4 -> "Valid range: -2147483648 to 2147483647"
+    ValueType.BYTE8 -> "Any whole number"
+    ValueType.FLOAT -> "Decimal number (e.g., 3.14)"
+    ValueType.DOUBLE -> "Decimal number"
+    ValueType.STRING_UTF8 -> "Any text"
+    ValueType.STRING_UTF16 -> "Any text"
+    ValueType.BYTE_ARRAY -> "Hex pairs separated by spaces (e.g., A1 B2 C3)"
+    ValueType.XOR4 -> "Integer value"
+    ValueType.XOR8 -> "Integer value"
+    ValueType.ALL -> "Enter a number"
+}

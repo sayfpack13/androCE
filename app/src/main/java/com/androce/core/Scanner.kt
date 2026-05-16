@@ -1,10 +1,14 @@
 package com.androce.core
 
+import com.androce.model.ChangeDirection
 import com.androce.model.MemoryRegion
 import com.androce.model.RegionFilter
 import com.androce.model.ScanComparison
 import com.androce.model.ScanResult
 import com.androce.model.ValueType
+import com.androce.model.bytesToLong
+import com.androce.model.bytesToInt
+import com.androce.model.bytesToShort
 import com.androce.model.matchesFilter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -169,11 +173,61 @@ object Scanner {
             val bytesList = MemoryReader.readBytesBatch(pid, reqs)
             results.forEachIndexed { idx, r ->
                 val b = bytesList[idx] ?: return@forEachIndexed
-                r.previousBytes = r.currentBytes.copyOf()
+                val oldBytes = r.currentBytes.copyOf()
+                r.previousBytes = oldBytes
                 r.currentBytes = b
+                // Compute change direction for numeric types
+                r.changeDirection = ChangeDirection.NONE
+                r.deltaDisplay = ""
+                if (!b.contentEquals(oldBytes)) {
+                    val cmp = compareNumericValues(r.valueType, oldBytes, b)
+                    r.changeDirection = when {
+                        cmp > 0 -> ChangeDirection.UP
+                        cmp < 0 -> ChangeDirection.DOWN
+                        else -> ChangeDirection.NONE
+                    }
+                    if (cmp != 0) {
+                        val delta = numericDelta(r.valueType, oldBytes, b)
+                        if (delta != null) r.deltaDisplay = (if (cmp > 0) "+" else "") + delta
+                    }
+                }
             }
             results
         }
+
+    private fun compareNumericValues(type: ValueType, old: ByteArray, new: ByteArray): Int {
+        return try {
+            when (type) {
+                ValueType.BYTE1 -> new[0].compareTo(old[0])
+                ValueType.BYTE2 -> bytesToShort(new).compareTo(bytesToShort(old))
+                ValueType.BYTE4, ValueType.XOR4 -> bytesToInt(new).compareTo(bytesToInt(old))
+                ValueType.BYTE8, ValueType.XOR8 -> bytesToLong(new).compareTo(bytesToLong(old))
+                ValueType.FLOAT -> java.lang.Float.intBitsToFloat(bytesToInt(new))
+                    .compareTo(java.lang.Float.intBitsToFloat(bytesToInt(old)))
+                ValueType.DOUBLE -> java.lang.Double.longBitsToDouble(bytesToLong(new))
+                    .compareTo(java.lang.Double.longBitsToDouble(bytesToLong(old)))
+                else -> 0
+            }
+        } catch (_: Exception) { 0 }
+    }
+
+    private fun numericDelta(type: ValueType, old: ByteArray, new: ByteArray): String? {
+        return try {
+            when (type) {
+                ValueType.BYTE1 -> (new[0].toInt() - old[0].toInt()).toString()
+                ValueType.BYTE2 -> (bytesToShort(new) - bytesToShort(old)).toString()
+                ValueType.BYTE4, ValueType.XOR4 -> (bytesToInt(new) - bytesToInt(old)).toString()
+                ValueType.BYTE8, ValueType.XOR8 -> (bytesToLong(new) - bytesToLong(old)).toString()
+                ValueType.FLOAT -> String.format("%.3f",
+                    java.lang.Float.intBitsToFloat(bytesToInt(new)) -
+                    java.lang.Float.intBitsToFloat(bytesToInt(old)))
+                ValueType.DOUBLE -> String.format("%.3f",
+                    java.lang.Double.longBitsToDouble(bytesToLong(new)) -
+                    java.lang.Double.longBitsToDouble(bytesToLong(old)))
+                else -> null
+            }
+        } catch (_: Exception) { null }
+    }
 
     private fun tcodeFor(t: ValueType): String = when (t) {
         ValueType.BYTE1 -> "i1"
