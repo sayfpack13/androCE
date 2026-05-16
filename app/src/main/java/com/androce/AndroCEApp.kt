@@ -10,11 +10,11 @@ class AndroCEApp : Application() {
     override fun onCreate() {
         super.onCreate()
         AppLogger.init(this)
-        MemoryReader.init(this)
         Shell.enableVerboseLogging = false
         Shell.setDefaultBuilder(
             Shell.Builder.create()
                 .setTimeout(30)
         )
+        MemoryReader.init(this)
     }
 }

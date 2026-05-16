@@ -204,21 +204,13 @@ fun SearchScreen(
             when (selectedTab) {
                 0 -> ConfigureTab(
                     selectedType = selectedType,
-                    searchInput = searchInput,
                     xorKey = xorKey,
                     resultsEmpty = results.isEmpty(),
                     onTypeChange = { t ->
                         selectedType = t
                         viewModel.selectedValueType = t
-                        searchInput = ""
-                        viewModel.searchInput = ""
                     },
-                    onSearchChange = { searchInput = it; viewModel.searchInput = it },
                     onXorChange = { xorKey = it; viewModel.xorKey = it.toLongOrNull() ?: 0L },
-                    onScanReady = {
-                        selectedTab = 1
-                        triggerScan()
-                    },
                     onUnknownInitial = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                         viewModel.selectedValueType = selectedType
@@ -236,6 +228,7 @@ fun SearchScreen(
                     rangeMax = rangeMax,
                     isScanning = scanState is ScanState.Scanning,
                     isPaused = isPaused,
+                    onSearchChange = { searchInput = it; viewModel.searchInput = it },
                     onRangeMinChange = { rangeMin = it; viewModel.rangeMin = it },
                     onRangeMaxChange = { rangeMax = it; viewModel.rangeMax = it },
                     onFirstScan = { triggerScan() },
@@ -267,13 +260,10 @@ fun SearchScreen(
 @Composable
 private fun ConfigureTab(
     selectedType: ValueType,
-    searchInput: String,
     xorKey: String,
     resultsEmpty: Boolean,
     onTypeChange: (ValueType) -> Unit,
-    onSearchChange: (String) -> Unit,
     onXorChange: (String) -> Unit,
-    onScanReady: () -> Unit,
     onUnknownInitial: () -> Unit
 ) {
     Column(
@@ -308,38 +298,6 @@ private fun ConfigureTab(
             }
         }
 
-        SectionLabel("Search Value")
-        OutlinedTextField(
-            value = searchInput,
-            onValueChange = onSearchChange,
-            label = { Text(searchHint(selectedType)) },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = selectedType != ValueType.STRING_UTF8 && selectedType != ValueType.STRING_UTF16,
-            keyboardOptions = KeyboardOptions(keyboardType = keyboardTypeFor(selectedType), imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { if (searchInput.isNotBlank()) onScanReady() }),
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Primary) },
-            trailingIcon = {
-                if (searchInput.isNotEmpty()) {
-                    IconButton(onClick = { onSearchChange("") }) {
-                        Icon(Icons.Default.Clear, contentDescription = "Clear", tint = OnSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
-                    }
-                }
-            },
-            colors = inputColors()
-        )
-
-        // "Go to Scan" button at the bottom of configure tab
-        Button(
-            onClick = onScanReady,
-            enabled = searchInput.isNotBlank(),
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(containerColor = Primary)
-        ) {
-            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Start Scan", fontWeight = FontWeight.Bold)
-        }
-
         // Unknown initial value — only meaningful when starting fresh
         if (resultsEmpty && !selectedType.isVariableLength) {
             Button(
@@ -370,6 +328,7 @@ private fun ScanTab(
     rangeMax: String,
     isScanning: Boolean,
     isPaused: Boolean,
+    onSearchChange: (String) -> Unit,
     onRangeMinChange: (String) -> Unit,
     onRangeMaxChange: (String) -> Unit,
     onFirstScan: () -> Unit,
@@ -463,45 +422,69 @@ private fun ScanTab(
                     }
                 }
             } else {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = onFirstScan,
-                        enabled = searchInput.isNotBlank(),
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    // Search input always visible in Scan tab for easy value changes
+                    OutlinedTextField(
+                        value = searchInput,
+                        onValueChange = onSearchChange,
+                        label = { Text(if (results.isEmpty()) "Search value" else "New value to refine") },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = Primary)
-                    ) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("First Scan", fontWeight = FontWeight.Bold)
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = {
+                            if (results.isEmpty()) onFirstScan() else onRefinedScan()
+                        }),
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Primary) },
+                        trailingIcon = {
+                            if (searchInput.isNotEmpty()) {
+                                IconButton(onClick = { onSearchChange("") }) {
+                                    Icon(Icons.Default.Clear, contentDescription = "Clear", tint = OnSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        },
+                        colors = inputColors()
+                    )
+
+                    if (results.isEmpty()) {
+                        // No results yet: only First Scan
+                        Button(
+                            onClick = onFirstScan,
+                            enabled = searchInput.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Primary)
+                        ) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("First Scan", fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        // Results exist: show refined scan + comparison + reset
                         Button(
                             onClick = onRefinedScan,
-                            enabled = results.isNotEmpty() && searchInput.isNotBlank(),
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant)
+                            enabled = searchInput.isNotBlank(),
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent)
                         ) {
-                            Text("Refined Scan")
+                            Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Refined Scan", fontWeight = FontWeight.Bold)
                         }
-                        Button(
-                            onClick = onReset,
-                            enabled = results.isNotEmpty() || scanState is ScanState.Done,
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Text("Reset")
-                        }
-                    }
-                    if (searchInput.isBlank()) {
-                        Row(
-                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-                                .background(Warning.copy(alpha = 0.1f)).border(1.dp, Warning.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                                .clickable(onClick = onGoToConfigure).padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(Icons.Default.Tune, contentDescription = null, tint = Warning, modifier = Modifier.size(16.dp))
-                            Text("Set a value in Configure tab first", color = Warning, fontSize = 12.sp)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(
+                                onClick = onFirstScan,
+                                enabled = searchInput.isNotBlank(),
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = Primary)
+                            ) {
+                                Text("New First Scan", fontSize = 12.sp)
+                            }
+                            Button(
+                                onClick = onReset,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Text("Reset All", fontSize = 12.sp)
+                            }
                         }
                     }
                 }

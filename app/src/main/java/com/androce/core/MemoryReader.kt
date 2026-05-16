@@ -16,7 +16,7 @@ object MemoryReader {
     private var pythonAvailable: Boolean = true
 
     fun init(context: Context) {
-        val dest = File(context.filesDir, "memscan")
+        var dest = File(context.filesDir, "memscan")
         try {
             context.assets.open("memscan").use { input ->
                 dest.outputStream().use { output ->
@@ -24,10 +24,34 @@ object MemoryReader {
                 }
             }
             Shell.cmd("chmod 755 ${dest.absolutePath}").exec()
-            nativeHelperPath = dest.absolutePath
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to extract native helper", e)
         }
+
+        // Test if binary works from app files dir; if not, try /data/local/tmp
+        val testRes = Shell.cmd("\"${dest.absolutePath}\" read 1 0 1 2>/dev/null || echo FAIL").exec()
+        val works = testRes.out.any { it.trim().startsWith("# start") }
+        if (!works) {
+            val tmpDest = File("/data/local/tmp/androce_memscan")
+            try {
+                context.assets.open("memscan").use { input ->
+                    tmpDest.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                Shell.cmd("chmod 755 ${tmpDest.absolutePath}").exec()
+                val tmpTest = Shell.cmd("\"${tmpDest.absolutePath}\" read 1 0 1 2>/dev/null || echo FAIL").exec()
+                if (tmpTest.out.any { it.trim().startsWith("# start") }) {
+                    dest = tmpDest
+                    AppLogger.d(TAG, "Using tmp native helper: ${dest.absolutePath}")
+                } else {
+                    AppLogger.e(TAG, "Native helper does not execute from files dir or tmp")
+                }
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to extract native helper to tmp", e)
+            }
+        }
+        nativeHelperPath = dest.absolutePath
 
         val pyCheck = Shell.cmd("command -v python3 >/dev/null 2>&1 && echo ok || command -v python >/dev/null 2>&1 && echo ok").exec()
         pythonAvailable = pyCheck.out.any { it.trim() == "ok" }
@@ -69,7 +93,9 @@ object MemoryReader {
     private fun runNativeCommand(vararg args: String): ScriptResult {
         val cmd = mutableListOf(nativeHelperPath)
         cmd.addAll(args)
-        val result = Shell.cmd(cmd.joinToString(" ") { "\"$it\"" }).exec()
+        val cmdStr = cmd.joinToString(" ") { "\"$it\"" }
+        val result = Shell.cmd(cmdStr).exec()
+        AppLogger.d(TAG, "runNativeCommand cmd=$cmdStr success=${result.isSuccess} out=${result.out.size} err=${result.err.size}")
         val stdout = mutableListOf<String>()
         val meta = mutableMapOf<String, String>()
         for (line in result.out) {
@@ -78,6 +104,9 @@ object MemoryReader {
                 val kv = t.removePrefix("#").trim().split(":", limit = 2)
                 if (kv.size == 2) meta[kv[0].trim()] = kv[1].trim()
             } else if (t.isNotEmpty()) stdout.add(t)
+        }
+        for (line in result.err) {
+            AppLogger.d(TAG, "runNativeCommand stderr: $line")
         }
         return ScriptResult(stdout, meta)
     }
@@ -366,10 +395,18 @@ os.close(fd)
                 nativeArgs.addAll(reqArgs)
                 runNativeCommand("readbatch", *nativeArgs.toTypedArray())
             }
+            // Build address map for native fallback (readbatch returns idx:hex, not addr:hex)
+            val addrByIndex = if (!pythonAvailable && batch.isNotEmpty()) {
+                batch.withIndex().associate { it.index.toString() to it.value }
+            } else null
             res.stdout.mapNotNull { line ->
                 val parts = line.split(":", limit = 2)
                 if (parts.size != 2) return@mapNotNull null
-                val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
+                val addr = if (addrByIndex != null) {
+                    addrByIndex[parts[0]] ?: return@mapNotNull null
+                } else {
+                    parts[0].toLongOrNull() ?: return@mapNotNull null
+                }
                 val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
                 if (bytes.size != pattern.size) return@mapNotNull null
                 if (wildcard != null) {
@@ -490,10 +527,12 @@ os.close(fd)
                 val nativeArgs = mutableListOf(pid.toString())
                 nativeArgs.addAll(reqArgs)
                 val res = runNativeCommand("readbatch", *nativeArgs.toTypedArray())
+                // readbatch returns idx:hex, not addr:hex
+                val addrByIndex: Map<String, Long> = batch.withIndex().associate { it.index.toString() to it.value.first }
                 val bytesMap = res.stdout.mapNotNull { line ->
                     val parts = line.split(":", limit = 2)
                     if (parts.size != 2) return@mapNotNull null
-                    val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
+                    val addr = addrByIndex[parts[0]] ?: return@mapNotNull null
                     val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
                     addr to bytes
                 }.toMap()

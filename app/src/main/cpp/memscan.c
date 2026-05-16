@@ -11,8 +11,15 @@
 #include <unistd.h>
 #include <sys/uio.h>
 #include <errno.h>
+#include <signal.h>
 
-#define CHUNK_SIZE (4 * 1024 * 1024)  /* 4 MB */
+static void crash_handler(int sig) {
+    printf("# crash:signal=%d\n", sig);
+    fflush(stdout);
+    _exit(128 + sig);
+}
+
+#define CHUNK_SIZE (64 * 1024)  /* 64 KB */
 #define MAX_RESULTS 500000
 
 static int hexchar(char c) {
@@ -38,7 +45,13 @@ static long read_mem(int pid, unsigned long addr, unsigned char *buf, size_t len
     struct iovec local = { buf, len };
     struct iovec remote = { (void *)addr, len };
     ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
-    return (n < 0) ? -1 : n;
+    if (n < 0) {
+        /* Print to stdout so libsu captures it */
+        printf("# read_err:pid=%d addr=%lu len=%zu errno=%d\n", pid, addr, len, errno);
+        fflush(stdout);
+        return -1;
+    }
+    return n;
 }
 
 /*
@@ -50,6 +63,7 @@ static long read_mem(int pid, unsigned long addr, unsigned char *buf, size_t len
  *   argv[6...]=region pairs "start:size"
  */
 int scan_mode(int argc, char **argv) {
+    printf("# scan_enter\n"); fflush(stdout);
     int pid = atoi(argv[2]);
     const char *pat_hex = argv[3];
     int pat_len = atoi(argv[4]);
@@ -62,26 +76,30 @@ int scan_mode(int argc, char **argv) {
         wildcard = tmp[0];
     }
 
+    printf("# scan_pat pid=%d pat_len=%d use_wc=%d\n", pid, pat_len, use_wc); fflush(stdout);
     unsigned char *pat = malloc(pat_len);
     int actual_len = hex_to_bytes(pat_hex, pat, pat_len);
     if (actual_len != pat_len) {
-        fprintf(stderr, "# error:bad_pattern\n");
+        printf("# error:bad_pattern\n"); fflush(stdout);
         return 1;
     }
 
     unsigned char *chunk = malloc(CHUNK_SIZE);
     if (!chunk) {
-        fprintf(stderr, "# error:malloc\n");
+        printf("# error:malloc\n"); fflush(stdout);
         return 1;
     }
 
     int found = 0;
     int skipped = 0;
     int capped = 0;
+    int region_count = 0;
 
+    printf("# scan_loop argc=%d\n", argc); fflush(stdout);
     for (int i = 6; i < argc && !capped; i++) {
         unsigned long start, size;
-        if (sscanf(argv[i], "%lx:%lx", &start, &size) != 2) continue;
+        if (sscanf(argv[i], "%lu:%lu", &start, &size) != 2) continue;
+        region_count++;
 
         unsigned long off = 0;
         while (off < size && !capped) {
@@ -126,8 +144,11 @@ int scan_mode(int argc, char **argv) {
         }
     }
 
+    printf("# done:regions=%d found=%d skipped=%d capped=%d\n", region_count, found, skipped, capped);
+    fflush(stdout);
     printf("# skipped:%d\n", skipped);
     printf("# capped:%d\n", capped);
+    fflush(stdout);
 
     free(pat);
     free(chunk);
@@ -171,7 +192,7 @@ int readbatch_mode(int argc, char **argv) {
     for (int i = 3; i < argc; i++) {
         unsigned long addr;
         int len;
-        if (sscanf(argv[i], "%lx:%d", &addr, &len) != 2) continue;
+        if (sscanf(argv[i], "%lu:%d", &addr, &len) != 2) continue;
 
         unsigned char *buf = malloc(len);
         if (!buf) continue;
@@ -213,7 +234,7 @@ int snapshot_mode(int argc, char **argv) {
 
     for (int i = 5; i < argc && !capped; i++) {
         unsigned long start, size;
-        if (sscanf(argv[i], "%lx:%lx", &start, &size) != 2) continue;
+        if (sscanf(argv[i], "%lu:%lu", &start, &size) != 2) continue;
 
         unsigned long off = 0;
         while (off < size && !capped) {
@@ -261,7 +282,7 @@ int write_mode(int argc, char **argv) {
     for (int i = 3; i < argc; i++) {
         unsigned long addr;
         char hex[1024];
-        if (sscanf(argv[i], "%lx:%1023s", &addr, hex) != 2) continue;
+        if (sscanf(argv[i], "%lu:%1023s", &addr, hex) != 2) continue;
 
         int len = strlen(hex) / 2;
         unsigned char *buf = malloc(len);
@@ -282,6 +303,13 @@ int write_mode(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    signal(SIGSEGV, crash_handler);
+    signal(SIGABRT, crash_handler);
+    signal(SIGILL, crash_handler);
+    signal(SIGBUS, crash_handler);
+    signal(SIGFPE, crash_handler);
+    printf("# start:1\n");
+    fflush(stdout);
     if (argc < 3) {
         fprintf(stderr, "Usage: memscan <mode> <pid> [args...]\n");
         return 1;
