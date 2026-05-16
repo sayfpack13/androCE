@@ -95,7 +95,8 @@ object MemoryReader {
         cmd.addAll(args)
         val cmdStr = cmd.joinToString(" ") { "\"$it\"" }
         val result = Shell.cmd(cmdStr).exec()
-        AppLogger.d(TAG, "runNativeCommand cmd=$cmdStr success=${result.isSuccess} out=${result.out.size} err=${result.err.size}")
+        // Log mode + arg count only — full cmdStr can be huge (thousands of addr:size pairs)
+        AppLogger.d(TAG, "runNativeCommand mode=${args.firstOrNull()} args=${args.size} success=${result.isSuccess} out=${result.out.size} err=${result.err.size}")
         val stdout = mutableListOf<String>()
         val meta = mutableMapOf<String, String>()
         for (line in result.out) {
