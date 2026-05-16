@@ -59,7 +59,37 @@
 4. Let Gradle sync (downloads dependencies automatically)
 5. Connect your rooted device → press **Run ▶**
 
-### Option B — Headless build on a Linux VPS / CI
+### Option B — Command line (no Android Studio)
+
+#### Windows
+One-time SDK setup (PowerShell):
+```powershell
+# Download JDK 21, Android SDK cmdline-tools, Gradle 8.7
+# to %USERPROFILE%\android-sdk — then set environment variables:
+[Environment]::SetEnvironmentVariable("ANDROID_HOME", "$env:USERPROFILE\android-sdk", "User")
+[Environment]::SetEnvironmentVariable("JAVA_HOME", "$env:USERPROFILE\android-sdk\jdk\jdk-21.0.6+7", "User")
+```
+
+Then use the provided scripts in the repo root:
+
+| Script | Action |
+|---|---|
+| `build.bat` | Build debug APK only |
+| `deploy.bat` | Install APK on connected device + launch app |
+| `build-and-deploy.bat` | Build, install, and launch in one step |
+| `logs.bat` | Stream live app logs (logcat) |
+
+```batch
+:: Build + deploy in one command
+cd androCE
+build-and-deploy.bat
+
+:: Or separately:
+build.bat
+deploy.bat
+```
+
+#### Linux / CI
 ```bash
 # Install JDK 17 and Android command-line tools
 sudo apt install -y openjdk-17-jdk unzip wget

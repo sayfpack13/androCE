@@ -1,0 +1,6 @@
+{
+    "android.sdkPath": "C:\\Users\\sayfp\\android-sdk",
+    "android.adbPath": "C:\\Users\\sayfp\\android-sdk\\platform-tools\\adb.exe",
+    "java.home": "C:\\Users\\sayfp\\android-sdk\\jdk\\jdk-21.0.6+7",
+    "java.jdt.ls.java.home": "C:\\Users\\sayfp\\android-sdk\\jdk\\jdk-21.0.6+7"
+}

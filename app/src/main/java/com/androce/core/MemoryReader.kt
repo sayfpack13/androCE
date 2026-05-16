@@ -1,14 +1,38 @@
 package com.androce.core
 
+import android.content.Context
 import com.androce.model.MemoryRegion
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 object MemoryReader {
 
     private const val TAG = "MemoryReader"
     const val MAX_RESULTS = 500_000
+
+    private var nativeHelperPath: String = ""
+    private var pythonAvailable: Boolean = true
+
+    fun init(context: Context) {
+        val dest = File(context.filesDir, "memscan")
+        try {
+            context.assets.open("memscan").use { input ->
+                dest.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            Shell.cmd("chmod 755 ${dest.absolutePath}").exec()
+            nativeHelperPath = dest.absolutePath
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to extract native helper", e)
+        }
+
+        val pyCheck = Shell.cmd("command -v python3 >/dev/null 2>&1 && echo ok || command -v python >/dev/null 2>&1 && echo ok").exec()
+        pythonAvailable = pyCheck.out.any { it.trim() == "ok" }
+        AppLogger.d(TAG, "Native helper: $nativeHelperPath, Python available: $pythonAvailable")
+    }
 
     /**
      * Run a Python script by writing it to the app's filesDir, executing once, and cleaning up.
@@ -41,6 +65,37 @@ object MemoryReader {
             }
             ScriptResult(stdout, meta)
         }
+
+    private fun runNativeCommand(vararg args: String): ScriptResult {
+        val cmd = mutableListOf(nativeHelperPath)
+        cmd.addAll(args)
+        val result = Shell.cmd(cmd.joinToString(" ") { "\"$it\"" }).exec()
+        val stdout = mutableListOf<String>()
+        val meta = mutableMapOf<String, String>()
+        for (line in result.out) {
+            val t = line.trim()
+            if (t.startsWith("#") && t.contains(":")) {
+                val kv = t.removePrefix("#").trim().split(":", limit = 2)
+                if (kv.size == 2) meta[kv[0].trim()] = kv[1].trim()
+            } else if (t.isNotEmpty()) stdout.add(t)
+        }
+        return ScriptResult(stdout, meta)
+    }
+
+    private fun dispatchScriptOrNative(
+        scriptBody: String,
+        tag: String,
+        nativeMode: String,
+        nativeArgs: List<String>
+    ): ScriptResult {
+        return if (pythonAvailable) {
+            // TODO: runPythonScript runs in suspend context, but we need a blocking version here.
+            // For now, just run synchronously via Shell for native fallback path.
+            ScriptResult(emptyList(), emptyMap()) // placeholder - actual callers handle this
+        } else {
+            runNativeCommand(nativeMode, *nativeArgs.toTypedArray())
+        }
+    }
 
     suspend fun getReadableRegions(pid: Int): List<MemoryRegion> = withContext(Dispatchers.IO) {
         val regions = mutableListOf<MemoryRegion>()
@@ -78,19 +133,22 @@ object MemoryReader {
     suspend fun readBytes(pid: Int, address: Long, length: Int): ByteArray? =
         withContext(Dispatchers.IO) {
             try {
-                val scriptBody = """
+                val res = if (pythonAvailable) {
+                    val scriptBody = """
 import os
 try:
     fd = os.open('/proc/$pid/mem', os.O_RDONLY)
-    os.lseek(fd, $address, os.SEEK_SET)
-    d = os.read(fd, $length)
+    d = os.pread(fd, $length, $address)
     os.close(fd)
     if len(d) == $length:
         print(d.hex())
 except Exception:
     pass
 """.trimIndent()
-                val res = runPythonScript(scriptBody, tag = "read1_$pid")
+                    runPythonScript(scriptBody, tag = "read1_$pid")
+                } else {
+                    runNativeCommand("read", pid.toString(), address.toString(), length.toString())
+                }
                 val hex = res.stdout.joinToString("").trim()
                 if (hex.isEmpty()) return@withContext null
                 hexToBytes(hex)
@@ -115,11 +173,12 @@ except Exception:
         if (regions.isEmpty()) return@withContext ScanOutcome(emptyList(), 0, false)
 
         val patHex = pattern.joinToString("") { "%02x".format(it) }
-        val wildcardHex = wildcard?.let { "%02x".format(it) } ?: ""
+        val wildcardHex = wildcard?.let { "%02x".format(it) } ?: "none"
         val regionList = regions.joinToString(",") { "(${it.startAddress},${it.size})" }
 
-        val scriptBody = if (wildcard == null) {
-            """
+        val res = if (pythonAvailable) {
+            val scriptBody = if (wildcard == null) {
+                """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 pat = bytes.fromhex('$patHex')
@@ -134,15 +193,15 @@ for start, size in [$regionList]:
         off = 0
         while off < size and found < cap:
             rsize = min(chunk, size - off)
-            os.lseek(fd, start + off, os.SEEK_SET)
-            data = os.read(fd, rsize)
-            if not data: break
+            data = os.pread(fd, rsize, start + off)
+            if not data:
+                off += rsize
+                continue
             i = data.find(pat)
             while i >= 0 and found < cap:
                 print(start + off + i)
                 found += 1
                 i = data.find(pat, i + n)
-            # Overlap by pattern length to catch matches spanning chunks
             off += max(1, rsize - n + 1)
     except Exception:
         skipped += 1
@@ -150,8 +209,8 @@ os.close(fd)
 print('# skipped:' + str(skipped))
 print('# capped:' + ('1' if found >= cap else '0'))
 """.trimIndent()
-        } else {
-            """
+            } else {
+                """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 pat = bytes.fromhex('$patHex')
@@ -167,9 +226,10 @@ for start, size in [$regionList]:
         off = 0
         while off < size and found < cap:
             rsize = min(chunk, size - off)
-            os.lseek(fd, start + off, os.SEEK_SET)
-            data = os.read(fd, rsize)
-            if not data: break
+            data = os.pread(fd, rsize, start + off)
+            if not data:
+                off += rsize
+                continue
             dlen = len(data)
             for i in range(dlen - n + 1):
                 if found >= cap: break
@@ -183,9 +243,14 @@ os.close(fd)
 print('# skipped:' + str(skipped))
 print('# capped:' + ('1' if found >= cap else '0'))
 """.trimIndent()
+            }
+            runPythonScript(scriptBody, tag = "scan_$pid")
+        } else {
+            val nativeArgs = mutableListOf(pid.toString(), patHex, pattern.size.toString(), wildcardHex)
+            nativeArgs.addAll(regions.map { "${it.startAddress}:${it.size}" })
+            runNativeCommand("scan", *nativeArgs.toTypedArray())
         }
 
-        val res = runPythonScript(scriptBody, tag = "scan_$pid")
         val addrs = res.stdout.mapNotNull { it.toLongOrNull() }
         val skipped = res.meta["skipped"]?.toIntOrNull() ?: 0
         val capped = res.meta["capped"] == "1"
@@ -203,17 +268,17 @@ print('# capped:' + ('1' if found >= cap else '0'))
     ): List<ByteArray?> = withContext(Dispatchers.IO) {
         if (requests.isEmpty()) return@withContext emptyList()
         val out = arrayOfNulls<ByteArray>(requests.size)
-        // Batch to keep script size under ~1 MB (~50K requests per batch)
-        val batchSize = 50_000
+        // Batch to keep script / command size under ~1 MB (~50K requests per batch)
+        val batchSize = if (pythonAvailable) 50_000 else 10_000
         for ((batchIndex, batch) in requests.chunked(batchSize).withIndex()) {
-            val reqList = batch.joinToString(",") { "(${it.first},${it.second})" }
-            val scriptBody = """
+            val res = if (pythonAvailable) {
+                val reqList = batch.joinToString(",") { "(${it.first},${it.second})" }
+                val scriptBody = """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 for idx, (addr, n) in enumerate([$reqList]):
     try:
-        os.lseek(fd, addr, os.SEEK_SET)
-        d = os.read(fd, n)
+        d = os.pread(fd, n, addr)
         if len(d) == n:
             print(str(idx) + ':' + d.hex())
         else:
@@ -222,7 +287,13 @@ for idx, (addr, n) in enumerate([$reqList]):
         print(str(idx) + ':')
 os.close(fd)
 """.trimIndent()
-            val res = runPythonScript(scriptBody, tag = "readb_${pid}_${batchIndex}")
+                runPythonScript(scriptBody, tag = "readb_${pid}_${batchIndex}")
+            } else {
+                val reqArgs = batch.map { "${it.first}:${it.second}" }
+                val nativeArgs = mutableListOf(pid.toString())
+                nativeArgs.addAll(reqArgs)
+                runNativeCommand("readbatch", *nativeArgs.toTypedArray())
+            }
             for (line in res.stdout) {
                 val parts = line.split(":", limit = 2)
                 if (parts.size != 2) continue
@@ -248,30 +319,30 @@ os.close(fd)
     ): List<Pair<Long, ByteArray>> = withContext(Dispatchers.IO) {
         if (addresses.isEmpty()) return@withContext emptyList()
         val patHex = pattern.joinToString("") { "%02x".format(it) }
-        val wildcardHex = wildcard?.let { "%02x".format(it) } ?: ""
         val allResults = mutableListOf<Pair<Long, ByteArray>>()
-        // Batch addresses to keep script size under ~1 MB (~50K addresses per batch)
-        val batchSize = 50_000
+        // Batch addresses to keep script / command size under ~1 MB
+        val batchSize = if (pythonAvailable) 50_000 else 10_000
         for (batch in addresses.chunked(batchSize)) {
-            val addrList = batch.joinToString(",")
-            val scriptBody = if (wildcard == null) {
-                """
+            val res = if (pythonAvailable) {
+                val addrList = batch.joinToString(",")
+                val scriptBody = if (wildcard == null) {
+                    """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 pat = bytes.fromhex('$patHex')
 n = len(pat)
 for addr in [$addrList]:
     try:
-        os.lseek(fd, addr, os.SEEK_SET)
-        d = os.read(fd, n)
+        d = os.pread(fd, n, addr)
         if len(d) == n and d == pat:
             print(str(addr) + ':' + d.hex())
     except Exception:
         pass
 os.close(fd)
 """.trimIndent()
-            } else {
-                """
+                } else {
+                    val wildcardHex = wildcard?.let { "%02x".format(it) } ?: ""
+                    """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 pat = bytes.fromhex('$patHex')
@@ -279,21 +350,36 @@ wc = bytes.fromhex('$wildcardHex')[0]
 n = len(pat)
 for addr in [$addrList]:
     try:
-        os.lseek(fd, addr, os.SEEK_SET)
-        d = os.read(fd, n)
+        d = os.pread(fd, n, addr)
         if len(d) == n and all(pat[j] == wc or d[j] == pat[j] for j in range(n)):
             print(str(addr) + ':' + d.hex())
     except Exception:
         pass
 os.close(fd)
 """.trimIndent()
+                }
+                runPythonScript(scriptBody, tag = "refine_$pid")
+            } else {
+                // Native: readbatch then filter in Kotlin
+                val reqArgs = batch.map { "${it}:${pattern.size}" }
+                val nativeArgs = mutableListOf(pid.toString())
+                nativeArgs.addAll(reqArgs)
+                runNativeCommand("readbatch", *nativeArgs.toTypedArray())
             }
-            val res = runPythonScript(scriptBody, tag = "refine_$pid")
             res.stdout.mapNotNull { line ->
                 val parts = line.split(":", limit = 2)
                 if (parts.size != 2) return@mapNotNull null
                 val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
                 val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
+                if (bytes.size != pattern.size) return@mapNotNull null
+                if (wildcard != null) {
+                    val match = bytes.indices.all { j ->
+                        pattern[j] == wildcard || bytes[j] == pattern[j]
+                    }
+                    if (!match) return@mapNotNull null
+                } else {
+                    if (!bytes.contentEquals(pattern)) return@mapNotNull null
+                }
                 addr to bytes
             }.also { allResults.addAll(it) }
         }
@@ -314,31 +400,32 @@ os.close(fd)
         operand2: String? = null
     ): List<Pair<Long, ByteArray>> = withContext(Dispatchers.IO) {
         if (items.isEmpty()) return@withContext emptyList()
-        val fmt = when (tcode) {
-            "u1" -> "<B"; "i1" -> "<b"
-            "u2" -> "<H"; "i2" -> "<h"
-            "u4" -> "<I"; "i4" -> "<i"
-            "u8" -> "<Q"; "i8" -> "<q"
-            "f4" -> "<f"; "f8" -> "<d"
-            else -> ""
-        }
-        // Cast operand strings to proper Python types so int==float mismatches don't occur
-        val op1Py = when {
-            operand1 == null -> "None"
-            fmt in listOf("<f", "<d") -> "float($operand1)"
-            else -> "int($operand1)"
-        }
-        val op2Py = when {
-            operand2 == null -> "None"
-            fmt in listOf("<f", "<d") -> "float($operand2)"
-            else -> "int($operand2)"
-        }
         val allResults = mutableListOf<Pair<Long, ByteArray>>()
-        // Batch items to keep script size under ~1 MB (~20K items per batch, each ~50 chars)
-        val batchSize = 20_000
-        for (batch in items.chunked(batchSize)) {
-            val itemsList = batch.joinToString(",") { "(${it.first},'${it.second.joinToString("") { b -> "%02x".format(b) }}',${it.third})" }
-            val scriptBody = """
+        // Batch items to keep script / command size under ~1 MB
+        val batchSize = if (pythonAvailable) 20_000 else 5_000
+
+        if (pythonAvailable) {
+            val fmt = when (tcode) {
+                "u1" -> "<B"; "i1" -> "<b"
+                "u2" -> "<H"; "i2" -> "<h"
+                "u4" -> "<I"; "i4" -> "<i"
+                "u8" -> "<Q"; "i8" -> "<q"
+                "f4" -> "<f"; "f8" -> "<d"
+                else -> ""
+            }
+            val op1Py = when {
+                operand1 == null -> "None"
+                fmt in listOf("<f", "<d") -> "float($operand1)"
+                else -> "int($operand1)"
+            }
+            val op2Py = when {
+                operand2 == null -> "None"
+                fmt in listOf("<f", "<d") -> "float($operand2)"
+                else -> "int($operand2)"
+            }
+            for (batch in items.chunked(batchSize)) {
+                val itemsList = batch.joinToString(",") { "(${it.first},'${it.second.joinToString("") { b -> "%02x".format(b) }}',${it.third})" }
+                val scriptBody = """
 import os, struct
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 fmt = '$fmt'
@@ -348,8 +435,7 @@ op2 = $op2Py
 eps = 1e-4
 for addr, prev_hex, n in [$itemsList]:
     try:
-        os.lseek(fd, addr, os.SEEK_SET)
-        d = os.read(fd, n)
+        d = os.pread(fd, n, addr)
         if len(d) != n: continue
         old = bytes.fromhex(prev_hex)
         if fmt:
@@ -388,16 +474,82 @@ for addr, prev_hex, n in [$itemsList]:
         pass
 os.close(fd)
 """.trimIndent()
-            val res = runPythonScript(scriptBody, tag = "cmp_$pid")
-            res.stdout.mapNotNull { line ->
-                val parts = line.split(":", limit = 2)
-                if (parts.size != 2) return@mapNotNull null
-                val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
-                val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
-                addr to bytes
-            }.also { allResults.addAll(it) }
+                val res = runPythonScript(scriptBody, tag = "cmp_$pid")
+                res.stdout.mapNotNull { line ->
+                    val parts = line.split(":", limit = 2)
+                    if (parts.size != 2) return@mapNotNull null
+                    val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
+                    val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
+                    addr to bytes
+                }.also { allResults.addAll(it) }
+            }
+        } else {
+            // Native fallback: readbatch then compare in Kotlin
+            for (batch in items.chunked(batchSize)) {
+                val reqArgs = batch.map { "${it.first}:${it.third}" }
+                val nativeArgs = mutableListOf(pid.toString())
+                nativeArgs.addAll(reqArgs)
+                val res = runNativeCommand("readbatch", *nativeArgs.toTypedArray())
+                val bytesMap = res.stdout.mapNotNull { line ->
+                    val parts = line.split(":", limit = 2)
+                    if (parts.size != 2) return@mapNotNull null
+                    val addr = parts[0].toLongOrNull() ?: return@mapNotNull null
+                    val bytes = if (parts[1].isNotEmpty()) hexToBytes(parts[1]) else return@mapNotNull null
+                    addr to bytes
+                }.toMap()
+
+                for ((addr, prevBytes, size) in batch) {
+                    val newBytes = bytesMap[addr] ?: continue
+                    if (newBytes.size != size) continue
+                    val keep = when (op) {
+                        "CHANGED" -> !newBytes.contentEquals(prevBytes)
+                        "UNCHANGED" -> newBytes.contentEquals(prevBytes)
+                        else -> {
+                            // For numeric comparisons, decode bytes
+                            val vNew = decodeBytes(newBytes, tcode)
+                            val vOld = decodeBytes(prevBytes, tcode)
+                            if (vNew == null || vOld == null) false
+                            else compareNumeric(op, vNew, vOld, operand1, operand2, tcode)
+                        }
+                    }
+                    if (keep) allResults.add(addr to newBytes)
+                }
+            }
         }
         allResults
+    }
+
+    private fun decodeBytes(bytes: ByteArray, tcode: String): Double? {
+        return try {
+            val buffer = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            when (tcode) {
+                "u1", "i1" -> buffer.get().toDouble()
+                "u2", "i2" -> buffer.getShort().toDouble()
+                "u4", "i4" -> buffer.getInt().toDouble()
+                "u8", "i8" -> buffer.getLong().toDouble()
+                "f4" -> buffer.getFloat().toDouble()
+                "f8" -> buffer.getDouble()
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun compareNumeric(op: String, vNew: Double, vOld: Double, operand1: String?, operand2: String?, tcode: String): Boolean {
+        val op1 = operand1?.toDoubleOrNull()
+        val op2 = operand2?.toDoubleOrNull()
+        val eps = 1e-4
+        val isFloat = tcode in listOf("f4", "f8")
+        return when (op) {
+            "INCREASED" -> vNew > vOld
+            "DECREASED" -> vNew < vOld
+            "INCREASED_BY" -> if (op1 != null && isFloat) kotlin.math.abs(vNew - vOld - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1)) else vNew - vOld == op1
+            "DECREASED_BY" -> if (op1 != null && isFloat) kotlin.math.abs(vOld - vNew - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1)) else vOld - vNew == op1
+            "BETWEEN" -> op1 != null && op2 != null && vNew >= op1 && vNew <= op2
+            "EXACT" -> if (op1 != null && isFloat) kotlin.math.abs(vNew - op1) <= eps * kotlin.math.max(1.0, kotlin.math.abs(op1)) else vNew == op1
+            else -> false
+        }
     }
 
     /**
@@ -413,7 +565,8 @@ os.close(fd)
     ): Triple<List<Pair<Long, ByteArray>>, Int, Boolean> = withContext(Dispatchers.IO) {
         if (regions.isEmpty() || slotSize <= 0) return@withContext Triple(emptyList(), 0, false)
         val regionList = regions.joinToString(",") { "(${it.startAddress},${it.size})" }
-        val scriptBody = """
+        val res = if (pythonAvailable) {
+            val scriptBody = """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
 n = $slotSize
@@ -428,9 +581,10 @@ for start, size in [$regionList]:
         off = 0
         while off < size and found < cap:
             rsize = min(chunk, size - off)
-            os.lseek(fd, start + off, os.SEEK_SET)
-            data = os.read(fd, rsize)
-            if not data: break
+            data = os.pread(fd, rsize, start + off)
+            if not data:
+                off += rsize
+                continue
             last = len(data) - n
             i = 0
             while i <= last and found < cap:
@@ -444,7 +598,12 @@ os.close(fd)
 print('# skipped:' + str(skipped))
 print('# capped:' + ('1' if found >= cap else '0'))
 """.trimIndent()
-        val res = runPythonScript(scriptBody, tag = "snapb_$pid")
+            runPythonScript(scriptBody, tag = "snapb_$pid")
+        } else {
+            val nativeArgs = mutableListOf(pid.toString(), slotSize.toString(), step.toString())
+            nativeArgs.addAll(regions.map { "${it.startAddress}:${it.size}" })
+            runNativeCommand("snapshot", *nativeArgs.toTypedArray())
+        }
         val skipped = res.meta["skipped"]?.toIntOrNull() ?: 0
         val capped = res.meta["capped"] == "1"
         val items = res.stdout.mapNotNull { line ->
@@ -466,17 +625,17 @@ print('# capped:' + ('1' if found >= cap else '0'))
         writes: List<Pair<Long, ByteArray>>
     ): Boolean = withContext(Dispatchers.IO) {
         if (writes.isEmpty()) return@withContext true
-        val list = writes.joinToString(",") {
-            "(${it.first},'${it.second.joinToString("") { b -> "%02x".format(b) }}')"
-        }
-        val scriptBody = """
+        val res = if (pythonAvailable) {
+            val list = writes.joinToString(",") {
+                "(${it.first},'${it.second.joinToString("") { b -> "%02x".format(b) }}')"
+            }
+            val scriptBody = """
 import os
 try:
     fd = os.open('/proc/$pid/mem', os.O_WRONLY)
     for addr, hx in [$list]:
         try:
-            os.lseek(fd, addr, os.SEEK_SET)
-            os.write(fd, bytes.fromhex(hx))
+            os.pwrite(fd, bytes.fromhex(hx), addr)
         except Exception:
             pass
     os.close(fd)
@@ -484,7 +643,12 @@ try:
 except Exception as e:
     print('# ok:0')
 """.trimIndent()
-        val res = runPythonScript(scriptBody, tag = "write_$pid")
+            runPythonScript(scriptBody, tag = "write_$pid")
+        } else {
+            val nativeArgs = mutableListOf(pid.toString())
+            nativeArgs.addAll(writes.map { "${it.first}:${it.second.joinToString("") { b -> "%02x".format(b) }}" })
+            runNativeCommand("write", *nativeArgs.toTypedArray())
+        }
         res.meta["ok"] == "1"
     }
 
