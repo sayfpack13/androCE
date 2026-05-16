@@ -37,10 +37,25 @@ data class ScanResult(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is ScanResult) return false
-        return address == other.address && valueType == other.valueType
+        return address == other.address
+                && valueType == other.valueType
+                && selected == other.selected
+                && frozen == other.frozen
+                && changeDirection == other.changeDirection
+                && deltaDisplay == other.deltaDisplay
+                && currentBytes.contentEquals(other.currentBytes)
     }
 
-    override fun hashCode(): Int = 31 * address.hashCode() + valueType.hashCode()
+    override fun hashCode(): Int {
+        var result = address.hashCode()
+        result = 31 * result + valueType.hashCode()
+        result = 31 * result + selected.hashCode()
+        result = 31 * result + frozen.hashCode()
+        result = 31 * result + changeDirection.hashCode()
+        result = 31 * result + deltaDisplay.hashCode()
+        result = 31 * result + currentBytes.contentHashCode()
+        return result
+    }
 }
 
 fun bytesToShort(b: ByteArray): Short =

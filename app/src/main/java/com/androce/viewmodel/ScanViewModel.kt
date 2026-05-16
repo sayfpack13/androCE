@@ -557,11 +557,20 @@ class ScanViewModel : ViewModel() {
         }
     }
 
+    @Volatile
+    private var isRefreshing = false
+
     fun refreshValues() {
         val pid = selectedProcess?.pid ?: return
+        if (isRefreshing) return
+        isRefreshing = true
         viewModelScope.launch(Dispatchers.IO) {
-            val refreshed = Scanner.refreshValues(pid, _results.value)
-            withContext(Dispatchers.Main) { _results.value = refreshed.toList() }
+            try {
+                val refreshed = Scanner.refreshValues(pid, _results.value)
+                withContext(Dispatchers.Main) { _results.value = refreshed }
+            } finally {
+                isRefreshing = false
+            }
         }
     }
 
@@ -608,6 +617,10 @@ class ScanViewModel : ViewModel() {
 
     fun removeResult(address: Long) {
         _results.value = _results.value.filter { it.address != address }
+    }
+
+    fun removeSelected() {
+        _results.value = _results.value.filter { !it.selected }
     }
 
     // ---- Lifecycle ----

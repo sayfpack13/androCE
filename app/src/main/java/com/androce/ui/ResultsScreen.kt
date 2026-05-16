@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
@@ -90,6 +91,7 @@ import com.androce.ui.theme.AccentGreen
 import com.androce.ui.theme.Primary
 import com.androce.ui.theme.SurfaceHigh
 import com.androce.ui.theme.SurfaceVariant
+import com.androce.ui.theme.Warning
 import com.androce.viewmodel.ScanViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -118,10 +120,12 @@ fun ResultsScreen(
     var autoRefresh by rememberSaveable { mutableStateOf(false) }
 
     // Auto-refresh timer: every 2 seconds when enabled and results exist
-    LaunchedEffect(autoRefresh, results.size) {
-        while (autoRefresh && results.isNotEmpty()) {
+    LaunchedEffect(autoRefresh) {
+        if (!autoRefresh) return@LaunchedEffect
+        while (true) {
             delay(2000)
-            if (autoRefresh) viewModel.refreshValues()
+            if (!autoRefresh) break
+            if (results.isNotEmpty()) viewModel.refreshValues()
         }
     }
 
@@ -133,14 +137,12 @@ fun ResultsScreen(
                     Column {
                         Text("Results", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                         AnimatedContent(
-                            targetState = results.size,
+                            targetState = selectedCount to results.size,
                             transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) },
                             label = "count"
-                        ) { count ->
-                            Text(
-                                "$count address${if (count != 1) "es" else ""}",
-                                color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace
-                            )
+                        ) { (sel, total) ->
+                            val subtitle = if (sel > 0) "$sel of $total selected" else "$total address${if (total != 1) "es" else ""}"
+                            Text(subtitle, color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
                         }
                     }
                 },
@@ -161,7 +163,11 @@ fun ResultsScreen(
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary)
                     }
                     IconButton(onClick = { viewModel.selectAll(!allSelected) }) {
-                        Icon(Icons.Default.SelectAll, contentDescription = "Select all", tint = Primary)
+                        Icon(
+                            if (allSelected) Icons.Default.Clear else Icons.Default.SelectAll,
+                            contentDescription = if (allSelected) "Deselect all" else "Select all",
+                            tint = Primary
+                        )
                     }
                     Box {
                         IconButton(onClick = { showMenu = true }) {
@@ -189,6 +195,17 @@ fun ResultsScreen(
                                     showLoadDialog = true
                                 }
                             )
+                            if (selectedCount > 0) {
+                                DropdownMenuItem(
+                                    text = { Text("Delete Selected ($selectedCount)") },
+                                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                    onClick = {
+                                        showMenu = false
+                                        viewModel.removeSelected()
+                                        scope.launch { snackBarHostState.showSnackbar("Deleted $selectedCount addresses") }
+                                    }
+                                )
+                            }
                         }
                     }
                 },
@@ -375,6 +392,7 @@ fun ResultsScreen(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ResultRow(
     result: ScanResult,
@@ -388,117 +406,171 @@ private fun ResultRow(
     var isEditing by remember { mutableStateOf(false) }
     var editValue by remember { mutableStateOf(result.displayValue()) }
 
-    Row(
+    // Visual selection state: background changes when selected
+    val bgColor = if (result.selected) Primary.copy(alpha = 0.08f) else SurfaceVariant
+    val borderColor = when {
+        result.frozen -> Accent.copy(alpha = 0.6f)
+        result.selected -> Primary.copy(alpha = 0.4f)
+        else -> Color.Transparent
+    }
+
+    // Type label color
+    val typeColor = when (result.valueType.category) {
+        com.androce.model.ValueTypeCategory.INTEGER -> Primary
+        com.androce.model.ValueTypeCategory.FLOAT -> Accent
+        com.androce.model.ValueTypeCategory.TEXT -> AccentGreen
+        com.androce.model.ValueTypeCategory.SPECIAL -> Warning
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(SurfaceVariant)
+            .clip(RoundedCornerShape(12.dp))
+            .background(bgColor)
             .border(
-                width = if (result.frozen) 1.dp else 0.dp,
-                color = if (result.frozen) Accent.copy(alpha = 0.5f) else Color.Transparent,
-                shape = RoundedCornerShape(10.dp)
+                width = if (result.frozen || result.selected) 1.5.dp else 0.dp,
+                color = borderColor,
+                shape = RoundedCornerShape(12.dp)
             )
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-            .animateContentSize(),
-        verticalAlignment = Alignment.CenterVertically
+            .combinedClickable(
+                onClick = { onToggleSelect() },
+                onLongClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onCopyAddress() }
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .animateContentSize()
     ) {
-        Checkbox(
-            checked = result.selected,
-            onCheckedChange = { onToggleSelect() },
-            colors = CheckboxDefaults.colors(checkedColor = Primary, uncheckedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)),
-            modifier = Modifier.size(24.dp)
-        )
-        Spacer(Modifier.width(8.dp))
-
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = result.addressHex,
-                color = Accent,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.clickable { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onCopyAddress() }
-            )
-            if (isEditing) {
-                OutlinedTextField(
-                    value = editValue,
-                    onValueChange = { editValue = it },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = inputColors(),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = { onWrite(editValue); isEditing = false })
+        // Top row: Address + Type chip + Action buttons
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Selection indicator dot
+                Box(
+                    Modifier
+                        .size(10.dp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(if (result.selected) Primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.15f))
                 )
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = result.addressHex,
+                    color = Accent,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+                // Type label chip
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(typeColor.copy(alpha = 0.12f))
+                        .border(0.5.dp, typeColor.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                ) {
                     Text(
-                        text = result.displayValue(),
-                        color = MaterialTheme.colorScheme.onBackground,
-                        fontSize = 13.sp,
-                        fontFamily = FontFamily.Monospace
+                        result.valueType.label,
+                        color = typeColor,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        lineHeight = 12.sp
                     )
-                    // Change direction badge
-                    if (result.changeDirection != com.androce.model.ChangeDirection.NONE) {
-                        val badgeColor = when (result.changeDirection) {
-                            com.androce.model.ChangeDirection.UP -> AccentGreen
-                            com.androce.model.ChangeDirection.DOWN -> MaterialTheme.colorScheme.error
-                            else -> Color.Transparent
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Box(Modifier.size(7.dp).clip(RoundedCornerShape(4.dp)).background(badgeColor))
-                            Text(
-                                text = result.deltaDisplay,
-                                color = badgeColor,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
+                }
+            }
+
+            // Action buttons row
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                // Freeze toggle (small icon button)
+                IconButton(
+                    onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onToggleFreeze() },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AcUnit,
+                        contentDescription = if (result.frozen) "Frozen" else "Freeze",
+                        tint = if (result.frozen) Accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                // Edit button
+                IconButton(
+                    onClick = {
+                        if (isEditing) { onWrite(editValue); isEditing = false }
+                        else { editValue = result.displayValue(); isEditing = true }
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isEditing) Icons.Default.Check else Icons.Default.Edit,
+                        contentDescription = if (isEditing) "Confirm" else "Edit",
+                        tint = if (isEditing) AccentGreen else Primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                // Delete button
+                IconButton(
+                    onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onDelete() },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Delete",
+                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
         }
 
-        Spacer(Modifier.width(4.dp))
+        Spacer(Modifier.height(4.dp))
 
-        IconButton(
-            onClick = {
-                if (isEditing) { onWrite(editValue); isEditing = false }
-                else { editValue = result.displayValue(); isEditing = true }
-            },
-            modifier = Modifier.size(36.dp)
-        ) {
-            Icon(
-                imageVector = if (isEditing) Icons.Default.Check else Icons.Default.Edit,
-                contentDescription = "Edit",
-                tint = if (isEditing) AccentGreen else Primary,
-                modifier = Modifier.size(18.dp)
+        // Bottom: Value display or edit field
+        if (isEditing) {
+            OutlinedTextField(
+                value = editValue,
+                onValueChange = { editValue = it },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = inputColors(),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onWrite(editValue); isEditing = false })
             )
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = result.displayValue(),
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontSize = 15.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold
+                )
+                // Change direction badge
+                if (result.changeDirection != com.androce.model.ChangeDirection.NONE) {
+                    val badgeColor = when (result.changeDirection) {
+                        com.androce.model.ChangeDirection.UP -> AccentGreen
+                        com.androce.model.ChangeDirection.DOWN -> MaterialTheme.colorScheme.error
+                        else -> Color.Transparent
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(badgeColor.copy(alpha = 0.12f))
+                            .border(0.5.dp, badgeColor.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                    ) {
+                        Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(badgeColor))
+                        Text(
+                            text = result.deltaDisplay,
+                            color = badgeColor,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
         }
-
-        IconButton(
-            onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onDelete() },
-            modifier = Modifier.size(36.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.Delete,
-                contentDescription = "Delete",
-                tint = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(18.dp)
-            )
-        }
-
-        Switch(
-            checked = result.frozen,
-            onCheckedChange = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); onToggleFreeze() },
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = Accent,
-                uncheckedTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f)
-            ),
-            thumbContent = if (result.frozen) {
-                { Icon(Icons.Default.AcUnit, contentDescription = null, modifier = Modifier.size(12.dp), tint = Accent) }
-            } else null
-        )
     }
 }

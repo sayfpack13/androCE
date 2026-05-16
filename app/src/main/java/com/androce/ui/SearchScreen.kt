@@ -33,7 +33,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Warning
@@ -42,7 +41,10 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -50,10 +52,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.TabRowDefaults.SecondaryIndicator
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -112,13 +110,6 @@ fun SearchScreen(
     var xorKey by remember { mutableStateOf(viewModel.xorKey.toString()) }
     var rangeMin by remember { mutableStateOf(viewModel.rangeMin) }
     var rangeMax by remember { mutableStateOf(viewModel.rangeMax) }
-    var selectedTab by remember { mutableStateOf(0) }
-
-    // When scan starts, jump to Scan tab
-    LaunchedEffect(scanState is ScanState.Scanning) {
-        if (scanState is ScanState.Scanning) selectedTab = 1
-    }
-
     fun triggerScan() {
         if (searchInput.isBlank()) return
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -130,141 +121,113 @@ fun SearchScreen(
         viewModel.firstScan()
     }
 
-    val tabs = listOf(
-        Icons.Default.Tune to "Configure",
-        Icons.Default.PlayArrow to "Scan"
-    )
-
     Scaffold(
         topBar = {
-            Column {
-                TopAppBar(
-                    title = {
-                        Column {
-                            Text("Memory Search", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                            Text(
-                                viewModel.selectedProcess?.let { "${it.name}  [PID ${it.pid}]" } ?: "",
-                                color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace
-                            )
-                        }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
-                )
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = Primary,
-                    indicator = { tabPositions ->
-                        SecondaryIndicator(
-                            modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                            color = Accent
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("Memory Search", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Text(
+                            viewModel.selectedProcess?.let { "${it.name}  [PID ${it.pid}]" } ?: "",
+                            color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace
                         )
-                    },
-                    divider = {}
-                ) {
-                    tabs.forEachIndexed { index, (icon, label) ->
-                        val selected = selectedTab == index
-                        Tab(
-                            selected = selected,
-                            onClick = { selectedTab = index },
-                            selectedContentColor = Primary,
-                            unselectedContentColor = OnSurface.copy(alpha = 0.5f)
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
+                    }
+                },
+                actions = {
+                    if (results.isNotEmpty()) {
+                        Box(
+                            Modifier.clip(RoundedCornerShape(8.dp))
+                                .background(AccentGreen.copy(alpha = 0.2f))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
                         ) {
-                            Row(
-                                Modifier.padding(vertical = 12.dp, horizontal = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Text(label, fontSize = 13.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
-                                // Badge on Scan tab showing result count
-                                if (index == 1 && results.isNotEmpty()) {
-                                    Box(
-                                        Modifier.clip(RoundedCornerShape(8.dp))
-                                            .background(AccentGreen.copy(alpha = 0.2f))
-                                            .padding(horizontal = 5.dp, vertical = 1.dp)
-                                    ) {
-                                        Text("${results.size}", color = AccentGreen, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                }
-                            }
+                            Text("${results.size} found", color = AccentGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                     }
-                }
-            }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+            )
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            when (selectedTab) {
-                0 -> ConfigureTab(
-                    selectedType = selectedType,
-                    xorKey = xorKey,
-                    resultsEmpty = results.isEmpty(),
-                    onTypeChange = { t ->
-                        selectedType = t
-                        viewModel.selectedValueType = t
-                    },
-                    onXorChange = { xorKey = it; viewModel.xorKey = it.toLongOrNull() ?: 0L },
-                    onUnknownInitial = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        viewModel.selectedValueType = selectedType
-                        viewModel.unknownInitialScan()
-                        selectedTab = 1
-                    }
-                )
-                1 -> ScanTab(
-                    scanState = scanState,
-                    results = results,
-                    regions = regions,
-                    selectedType = selectedType,
-                    searchInput = searchInput,
-                    rangeMin = rangeMin,
-                    rangeMax = rangeMax,
-                    isScanning = scanState is ScanState.Scanning,
-                    isPaused = isPaused,
-                    onSearchChange = { searchInput = it; viewModel.searchInput = it },
-                    onRangeMinChange = { rangeMin = it; viewModel.rangeMin = it },
-                    onRangeMaxChange = { rangeMax = it; viewModel.rangeMax = it },
-                    onFirstScan = { triggerScan() },
-                    onRefinedScan = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        viewModel.searchInput = searchInput
-                        viewModel.selectedValueType = selectedType
-                        viewModel.refinedScan()
-                    },
-                    onComparison = { op ->
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        viewModel.searchInput = searchInput
-                        viewModel.rangeMin = rangeMin
-                        viewModel.rangeMax = rangeMax
-                        viewModel.selectedValueType = selectedType
-                        viewModel.comparisonScan(op)
-                    },
-                    onStop = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.cancelScan() },
-                    onPauseResume = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.togglePause() },
-                    onReset = { viewModel.resetScan() },
-                    onViewResults = onViewResults,
-                    onGoToConfigure = { selectedTab = 0 }
-                )
-            }
+            ScanTab(
+                scanState = scanState,
+                results = results,
+                regions = regions,
+                selectedType = selectedType,
+                searchInput = searchInput,
+                rangeMin = rangeMin,
+                rangeMax = rangeMax,
+                xorKey = xorKey,
+                isScanning = scanState is ScanState.Scanning,
+                isPaused = isPaused,
+                onSearchChange = { searchInput = it; viewModel.searchInput = it },
+                onRangeMinChange = { rangeMin = it; viewModel.rangeMin = it },
+                onRangeMaxChange = { rangeMax = it; viewModel.rangeMax = it },
+                onTypeChange = { t ->
+                    selectedType = t
+                    viewModel.selectedValueType = t
+                },
+                onXorChange = { xorKey = it; viewModel.xorKey = it.toLongOrNull() ?: 0L },
+                onFirstScan = { triggerScan() },
+                onRefinedScan = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    viewModel.searchInput = searchInput
+                    viewModel.selectedValueType = selectedType
+                    viewModel.refinedScan()
+                },
+                onComparison = { op ->
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    viewModel.searchInput = searchInput
+                    viewModel.rangeMin = rangeMin
+                    viewModel.rangeMax = rangeMax
+                    viewModel.selectedValueType = selectedType
+                    viewModel.comparisonScan(op)
+                },
+                onUnknownInitial = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    viewModel.selectedValueType = selectedType
+                    viewModel.unknownInitialScan()
+                },
+                onStop = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.cancelScan() },
+                onPauseResume = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); viewModel.togglePause() },
+                onReset = { viewModel.resetScan() },
+                onViewResults = onViewResults
+            )
         }
     }
 }
 
 @Composable
-private fun ConfigureTab(
+private fun ScanTab(
+    scanState: ScanState,
+    results: List<com.androce.model.ScanResult>,
+    regions: List<com.androce.model.MemoryRegion>,
     selectedType: ValueType,
+    searchInput: String,
+    rangeMin: String,
+    rangeMax: String,
     xorKey: String,
-    resultsEmpty: Boolean,
+    isScanning: Boolean,
+    isPaused: Boolean,
+    onSearchChange: (String) -> Unit,
+    onRangeMinChange: (String) -> Unit,
+    onRangeMaxChange: (String) -> Unit,
     onTypeChange: (ValueType) -> Unit,
     onXorChange: (String) -> Unit,
-    onUnknownInitial: () -> Unit
+    onFirstScan: () -> Unit,
+    onRefinedScan: () -> Unit,
+    onComparison: (ScanComparison) -> Unit,
+    onUnknownInitial: () -> Unit,
+    onStop: () -> Unit,
+    onPauseResume: () -> Unit,
+    onReset: () -> Unit,
+    onViewResults: () -> Unit
 ) {
     Column(
         Modifier
@@ -273,8 +236,24 @@ private fun ConfigureTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        SectionLabel("Value Type")
-        ValueTypeGrid(selected = selectedType, onSelect = onTypeChange)
+        // Type selection + summary
+        Box(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                .background(SurfaceVariant).padding(14.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("Value Type", color = OnSurface.copy(alpha = 0.6f), fontSize = 10.sp, letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
+                    AnimatedContent(targetState = regions.size, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) }, label = "region_count") { count ->
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(if (count == 0) "…" else "$count", color = Accent, fontSize = 14.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                            Text("regions", color = OnSurface.copy(alpha = 0.5f), fontSize = 10.sp)
+                        }
+                    }
+                }
+                ValueTypeDropdown(selected = selectedType, onSelect = onTypeChange)
+            }
+        }
 
         AnimatedVisibility(selectedType == ValueType.XOR4 || selectedType == ValueType.XOR8) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -299,7 +278,7 @@ private fun ConfigureTab(
         }
 
         // Unknown initial value — only meaningful when starting fresh
-        if (resultsEmpty && !selectedType.isVariableLength) {
+        if (results.isEmpty() && !selectedType.isVariableLength && !isScanning) {
             Button(
                 onClick = onUnknownInitial,
                 modifier = Modifier.fillMaxWidth(),
@@ -313,73 +292,6 @@ private fun ConfigureTab(
                 "Snapshots all aligned slots — use comparison ops afterwards.",
                 color = OnSurface.copy(alpha = 0.55f), fontSize = 11.sp
             )
-        }
-    }
-}
-
-@Composable
-private fun ScanTab(
-    scanState: ScanState,
-    results: List<com.androce.model.ScanResult>,
-    regions: List<com.androce.model.MemoryRegion>,
-    selectedType: ValueType,
-    searchInput: String,
-    rangeMin: String,
-    rangeMax: String,
-    isScanning: Boolean,
-    isPaused: Boolean,
-    onSearchChange: (String) -> Unit,
-    onRangeMinChange: (String) -> Unit,
-    onRangeMaxChange: (String) -> Unit,
-    onFirstScan: () -> Unit,
-    onRefinedScan: () -> Unit,
-    onComparison: (ScanComparison) -> Unit,
-    onStop: () -> Unit,
-    onPauseResume: () -> Unit,
-    onReset: () -> Unit,
-    onViewResults: () -> Unit,
-    onGoToConfigure: () -> Unit
-) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        // Summary card showing what will be scanned
-        Box(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                .background(SurfaceVariant).padding(14.dp)
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("Target", color = OnSurface.copy(alpha = 0.6f), fontSize = 10.sp, letterSpacing = 1.sp, fontWeight = FontWeight.Bold)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        val typeColor = categoryColorFor(selectedType.category)
-                        Box(Modifier.clip(RoundedCornerShape(6.dp)).background(typeColor.copy(alpha = 0.15f))
-                            .border(1.dp, typeColor.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 8.dp, vertical = 3.dp)) {
-                            Text(selectedType.label, color = typeColor, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                        if (searchInput.isNotBlank()) {
-                            Text("= $searchInput", color = OnBackground, fontSize = 13.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                        } else {
-                            Text("No value set", color = OnSurface.copy(alpha = 0.4f), fontSize = 12.sp)
-                        }
-                    }
-                }
-                AnimatedContent(targetState = regions.size, transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(200)) }, label = "region_count") { count ->
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(if (count == 0) "…" else "$count", color = Accent, fontSize = 18.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                        Text("regions", color = OnSurface.copy(alpha = 0.5f), fontSize = 10.sp)
-                    }
-                }
-            }
         }
 
         // Comparison control row (only when we have previous results)
@@ -528,99 +440,76 @@ private fun SectionLabel(text: String) {
     Text(text = text.uppercase(), color = Primary, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ValueTypeGrid(selected: ValueType, onSelect: (ValueType) -> Unit) {
+private fun ValueTypeDropdown(selected: ValueType, onSelect: (ValueType) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
     val grouped = ValueType.entries.groupBy { it.category }
+    val categoryOrder = listOf(ValueTypeCategory.INTEGER, ValueTypeCategory.FLOAT, ValueTypeCategory.TEXT, ValueTypeCategory.SPECIAL)
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        ValueTypeCategory.entries.forEach { category ->
-            val categoryColor = when (category) {
-                ValueTypeCategory.INTEGER -> Primary
-                ValueTypeCategory.FLOAT   -> Accent
-                ValueTypeCategory.TEXT    -> AccentGreen
-                ValueTypeCategory.SPECIAL -> Warning
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.padding(bottom = 2.dp)
-            ) {
-                Box(Modifier.size(3.dp, 14.dp).clip(RoundedCornerShape(2.dp)).background(categoryColor))
-                Text(text = category.name.lowercase(), color = Primary, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-            }
-            (grouped[category] ?: emptyList()).chunked(2).forEach { rowTypes ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    rowTypes.forEach { type ->
-                        ValueTypeCard(
-                            type = type,
-                            isSelected = type == selected,
-                            accentColor = categoryColor,
-                            modifier = Modifier.weight(1f),
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = !expanded }
+    ) {
+        OutlinedTextField(
+            value = selected.label,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Type") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier.fillMaxWidth().menuAnchor(),
+            colors = inputColors()
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            categoryOrder.forEach { category ->
+                val types = grouped[category] ?: emptyList()
+                if (types.isNotEmpty()) {
+                    // Category header
+                    val categoryColor = when (category) {
+                        ValueTypeCategory.INTEGER -> Primary
+                        ValueTypeCategory.FLOAT -> Accent
+                        ValueTypeCategory.TEXT -> AccentGreen
+                        ValueTypeCategory.SPECIAL -> Warning
+                    }
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        Text(
+                            category.label.uppercase(),
+                            color = categoryColor,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.5.sp
+                        )
+                    }
+                    types.forEach { type ->
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Box(
+                                        Modifier.size(8.dp).clip(RoundedCornerShape(4.dp))
+                                            .background(categoryColor.copy(alpha = if (type == selected) 1f else 0.3f))
+                                    )
+                                    Column {
+                                        Text(type.label, fontWeight = if (type == selected) FontWeight.Bold else FontWeight.Normal)
+                                        Text(type.description, fontSize = 11.sp, color = OnSurface.copy(alpha = 0.6f))
+                                    }
+                                }
+                            },
                             onClick = {
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 onSelect(type)
+                                expanded = false
+                            },
+                            trailingIcon = {
+                                if (type == selected) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = Primary, modifier = Modifier.size(18.dp))
+                                }
                             }
                         )
                     }
-                    // fill empty slot if odd number
-                    if (rowTypes.size == 1) Spacer(Modifier.weight(1f))
-                }
-                Spacer(Modifier.height(6.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun ValueTypeCard(
-    type: ValueType,
-    isSelected: Boolean,
-    accentColor: Color,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    val bgColor by animateColorAsState(
-        if (isSelected) accentColor.copy(alpha = 0.18f) else SurfaceVariant,
-        tween(150), label = "card_bg"
-    )
-    val borderColor by animateColorAsState(
-        if (isSelected) accentColor else Color.Transparent,
-        tween(150), label = "card_border"
-    )
-
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(bgColor)
-            .border(1.5.dp, borderColor, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = type.label,
-                    color = if (isSelected) accentColor else OnBackground,
-                    fontSize = 13.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                )
-                Text(
-                    text = type.description,
-                    color = OnSurface.copy(alpha = if (isSelected) 0.9f else 0.6f),
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    lineHeight = 13.sp
-                )
-            }
-            if (isSelected) {
-                Spacer(Modifier.width(6.dp))
-                Box(
-                    Modifier.size(18.dp).clip(RoundedCornerShape(9.dp))
-                        .background(Brush.linearGradient(listOf(accentColor, accentColor.copy(alpha = 0.6f)))),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Default.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(11.dp))
                 }
             }
         }

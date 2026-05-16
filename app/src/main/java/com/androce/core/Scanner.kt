@@ -171,28 +171,34 @@ object Scanner {
             if (results.isEmpty()) return@withContext results
             val reqs = results.map { it.address to it.currentBytes.size }
             val bytesList = MemoryReader.readBytesBatch(pid, reqs)
-            results.forEachIndexed { idx, r ->
-                val b = bytesList[idx] ?: return@forEachIndexed
-                val oldBytes = r.currentBytes.copyOf()
-                r.previousBytes = oldBytes
-                r.currentBytes = b
-                // Compute change direction for numeric types
-                r.changeDirection = ChangeDirection.NONE
-                r.deltaDisplay = ""
-                if (!b.contentEquals(oldBytes)) {
-                    val cmp = compareNumericValues(r.valueType, oldBytes, b)
-                    r.changeDirection = when {
-                        cmp > 0 -> ChangeDirection.UP
-                        cmp < 0 -> ChangeDirection.DOWN
-                        else -> ChangeDirection.NONE
+            results.mapIndexed { idx, r ->
+                val b = bytesList[idx]
+                if (b == null) {
+                    r.copy(previousBytes = r.currentBytes.copyOf())
+                } else {
+                    val oldBytes = r.currentBytes.copyOf()
+                    var dir = ChangeDirection.NONE
+                    var delta = ""
+                    if (!b.contentEquals(oldBytes)) {
+                        val cmp = compareNumericValues(r.valueType, oldBytes, b)
+                        dir = when {
+                            cmp > 0 -> ChangeDirection.UP
+                            cmp < 0 -> ChangeDirection.DOWN
+                            else -> ChangeDirection.NONE
+                        }
+                        if (cmp != 0) {
+                            val d = numericDelta(r.valueType, oldBytes, b)
+                            if (d != null) delta = (if (cmp > 0) "+" else "") + d
+                        }
                     }
-                    if (cmp != 0) {
-                        val delta = numericDelta(r.valueType, oldBytes, b)
-                        if (delta != null) r.deltaDisplay = (if (cmp > 0) "+" else "") + delta
-                    }
+                    r.copy(
+                        previousBytes = oldBytes,
+                        currentBytes = b,
+                        changeDirection = dir,
+                        deltaDisplay = delta
+                    )
                 }
             }
-            results
         }
 
     private fun compareNumericValues(type: ValueType, old: ByteArray, new: ByteArray): Int {
