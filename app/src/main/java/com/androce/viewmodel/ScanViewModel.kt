@@ -119,6 +119,14 @@ class ScanViewModel : ViewModel() {
         }
     }
 
+    private suspend fun getOrLoadRegions(pid: Int): List<MemoryRegion> {
+        val existing = _regions.value
+        if (existing.isNotEmpty()) return existing
+        val loaded = MemoryReader.getReadableRegions(pid)
+        withContext(Dispatchers.Main) { _regions.value = loaded }
+        return loaded
+    }
+
     // ---- Scans ----
 
     fun firstScan() {
@@ -132,6 +140,7 @@ class ScanViewModel : ViewModel() {
                     withContext(Dispatchers.Main) {
                         _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
                     }
+                    val regions = getOrLoadRegions(pid)
 
                     val numericTypes = listOf(
                         com.androce.model.ValueType.BYTE1, com.androce.model.ValueType.BYTE2,
@@ -170,7 +179,7 @@ class ScanViewModel : ViewModel() {
                             valueType = type,
                             pattern = pattern,
                             wildcard = wildcard,
-                            regions = _regions.value,
+                            regions = regions,
                             regionFilter = _regionFilter.value,
                             onProgress = { progress ->
                                 if (isActive) {
@@ -209,6 +218,7 @@ class ScanViewModel : ViewModel() {
                     withContext(Dispatchers.Main) {
                         _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
                     }
+                    val regions = getOrLoadRegions(pid)
 
                     val allResults = if (selectedValueType == ValueType.STRING) {
                         // Search for both UTF-8 and UTF-16LE encodings
@@ -222,7 +232,7 @@ class ScanViewModel : ViewModel() {
                             valueType = ValueType.STRING,
                             pattern = utf8Pattern,
                             wildcard = null,
-                            regions = _regions.value,
+                            regions = regions,
                             regionFilter = _regionFilter.value,
                             onProgress = { progress ->
                                 if (isActive) {
@@ -237,7 +247,7 @@ class ScanViewModel : ViewModel() {
                             valueType = ValueType.STRING,
                             pattern = utf16Pattern,
                             wildcard = null,
-                            regions = _regions.value,
+                            regions = regions,
                             regionFilter = _regionFilter.value,
                             onProgress = { progress ->
                                 if (isActive) {
@@ -274,7 +284,7 @@ class ScanViewModel : ViewModel() {
                             valueType = selectedValueType,
                             pattern = pattern,
                             wildcard = wildcard,
-                            regions = _regions.value,
+                            regions = regions,
                             regionFilter = _regionFilter.value,
                             onProgress = { progress ->
                                 if (isActive) {
@@ -313,6 +323,7 @@ class ScanViewModel : ViewModel() {
             _isPaused.value = false
             scanJob = viewModelScope.launch(Dispatchers.IO) {
                 try {
+                    val regions = getOrLoadRegions(pid)
                     val numericTypes = listOf(
                         com.androce.model.ValueType.BYTE1, com.androce.model.ValueType.BYTE2,
                         com.androce.model.ValueType.BYTE4, com.androce.model.ValueType.BYTE8,
@@ -327,7 +338,7 @@ class ScanViewModel : ViewModel() {
                         }
 
                         val found = Scanner.unknownInitialScan(
-                            pid, type, _regions.value, _regionFilter.value
+                            pid, type, regions, _regionFilter.value
                         ) { p ->
                             if (isActive) {
                                 viewModelScope.launch(Dispatchers.Main) {
@@ -369,8 +380,9 @@ class ScanViewModel : ViewModel() {
             _isPaused.value = false
             scanJob = viewModelScope.launch(Dispatchers.IO) {
                 try {
+                    val regions = getOrLoadRegions(pid)
                     val found = Scanner.unknownInitialScan(
-                        pid, selectedValueType, _regions.value, _regionFilter.value
+                        pid, selectedValueType, regions, _regionFilter.value
                     ) { p ->
                         if (isActive) {
                             viewModelScope.launch(Dispatchers.Main) {
