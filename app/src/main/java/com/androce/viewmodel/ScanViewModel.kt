@@ -118,7 +118,7 @@ class ScanViewModel : ViewModel() {
             try {
                 val regions = MemoryReader.getReadableRegions(pid)
                 withContext(Dispatchers.Main) {
-                    if (_selectedProcess?.pid == pid) {
+                    if (isCurrentProcess(pid)) {
                         _regions.value = regions
                         regionsPid = pid
                     }
@@ -133,6 +133,8 @@ class ScanViewModel : ViewModel() {
         }
     }
 
+    private fun isCurrentProcess(pid: Int): Boolean = _selectedProcess?.pid == pid
+
     /**
      * Returns cached readable regions for [pid], or loads them once in a thread-safe way.
      * Cache is PID-aware and protected with a mutex to prevent duplicate concurrent loads.
@@ -140,16 +142,17 @@ class ScanViewModel : ViewModel() {
     private suspend fun getOrLoadRegions(pid: Int): List<MemoryRegion> {
         return regionLoadMutex.withLock {
             val cached = _regions.value
-            if (cached.isNotEmpty() && regionsPid == pid) return@withLock cached
+            if (regionsPid == pid) return@withLock cached
 
             try {
                 val loaded = MemoryReader.getReadableRegions(pid)
                 val applied = withContext(Dispatchers.Main) {
-                    if (_selectedProcess?.pid == pid) {
+                    if (isCurrentProcess(pid)) {
                         _regions.value = loaded
                         regionsPid = pid
                         true
                     } else {
+                        regionsPid = null
                         false
                     }
                 }
@@ -157,7 +160,7 @@ class ScanViewModel : ViewModel() {
             } catch (e: Exception) {
                 AppLogger.e("ScanViewModel", "getOrLoadRegions failed", e)
                 withContext(Dispatchers.Main) {
-                    if (_selectedProcess?.pid == pid) {
+                    if (isCurrentProcess(pid)) {
                         _regions.value = emptyList()
                         regionsPid = null
                     }
