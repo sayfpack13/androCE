@@ -1,6 +1,6 @@
 /*
- * Native memory scanner for Android 15+ compatibility.
- * Uses process_vm_readv instead of /proc/[pid]/mem which is blocked on newer Android kernels.
+ * Native memory scanner for Android.
+ * Uses /proc/[pid]/mem + pread() for fresh page reads, with process_vm_readv fallback.
  * 
  * Build: $ANDROID_NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android34-clang
  */
@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/uio.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 
 static void crash_handler(int sig) {
@@ -21,6 +22,9 @@ static void crash_handler(int sig) {
 
 #define CHUNK_SIZE (64 * 1024)  /* 64 KB */
 #define MAX_RESULTS 500000
+
+/* Global fd for /proc/pid/mem — opened once per mode, closed at end */
+static int g_mem_fd = -1;
 
 static int hexchar(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -41,14 +45,24 @@ static int hex_to_bytes(const char *hex, unsigned char *out, int max_len) {
     return j;
 }
 
+static void open_mem_fd(int pid) {
+    if (g_mem_fd >= 0) return;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/mem", pid);
+    g_mem_fd = open(path, O_RDONLY);
+}
+
 static long read_mem(int pid, unsigned long addr, unsigned char *buf, size_t len) {
+    /* Prefer /proc/pid/mem + pread — reads fresh page table data, not stale cache */
+    if (g_mem_fd >= 0) {
+        ssize_t n = pread(g_mem_fd, buf, len, (off_t)addr);
+        if (n > 0) return n;
+    }
+    /* Fallback to process_vm_readv */
     struct iovec local = { buf, len };
     struct iovec remote = { (void *)addr, len };
     ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
     if (n < 0) {
-        /* Print to stdout so libsu captures it */
-        printf("# read_err:pid=%d addr=%lu len=%zu errno=%d\n", pid, addr, len, errno);
-        fflush(stdout);
         return -1;
     }
     return n;
@@ -65,6 +79,7 @@ static long read_mem(int pid, unsigned long addr, unsigned char *buf, size_t len
 int scan_mode(int argc, char **argv) {
     printf("# scan_enter\n"); fflush(stdout);
     int pid = atoi(argv[2]);
+    open_mem_fd(pid);
     const char *pat_hex = argv[3];
     int pat_len = atoi(argv[4]);
     const char *wc_hex = argv[5];
@@ -105,6 +120,11 @@ int scan_mode(int argc, char **argv) {
         while (off < size && !capped) {
             size_t rsize = (size - off < CHUNK_SIZE) ? (size - off) : CHUNK_SIZE;
             long n = read_mem(pid, start + off, chunk, rsize);
+            /* Retry once on failure — page may be temporarily unavailable */
+            if (n <= 0) {
+                usleep(100);
+                n = read_mem(pid, start + off, chunk, rsize);
+            }
             if (n < 0) {
                 skipped++;
                 off += rsize;
@@ -152,6 +172,7 @@ int scan_mode(int argc, char **argv) {
 
     free(pat);
     free(chunk);
+    if (g_mem_fd >= 0) { close(g_mem_fd); g_mem_fd = -1; }
     return 0;
 }
 
@@ -163,6 +184,7 @@ int scan_mode(int argc, char **argv) {
  */
 int read_mode(int argc, char **argv) {
     int pid = atoi(argv[2]);
+    open_mem_fd(pid);
     unsigned long addr = strtoul(argv[3], NULL, 0);
     int len = atoi(argv[4]);
 
@@ -179,6 +201,7 @@ int read_mode(int argc, char **argv) {
     }
 
     free(buf);
+    if (g_mem_fd >= 0) { close(g_mem_fd); g_mem_fd = -1; }
     return 0;
 }
 
@@ -189,6 +212,7 @@ int read_mode(int argc, char **argv) {
  */
 int readbatch_mode(int argc, char **argv) {
     int pid = atoi(argv[2]);
+    open_mem_fd(pid);
     for (int i = 3; i < argc; i++) {
         unsigned long addr;
         int len;
@@ -198,7 +222,18 @@ int readbatch_mode(int argc, char **argv) {
         if (!buf) continue;
 
         long n = read_mem(pid, addr, buf, len);
-        if (n == len) {
+        /* Retry once on failure — page may be temporarily swapped */
+        if (n <= 0) {
+            usleep(200);
+            n = read_mem(pid, addr, buf, len);
+        }
+        if (n >= len) {
+            printf("%d:", i - 3);
+            for (int j = 0; j < len; j++) printf("%02x", buf[j]);
+            printf("\n");
+        } else if (n > 0) {
+            /* Partial read — pad remaining with zeros so caller gets expected size */
+            memset(buf + n, 0, len - n);
             printf("%d:", i - 3);
             for (int j = 0; j < len; j++) printf("%02x", buf[j]);
             printf("\n");
@@ -207,6 +242,7 @@ int readbatch_mode(int argc, char **argv) {
         }
         free(buf);
     }
+    if (g_mem_fd >= 0) { close(g_mem_fd); g_mem_fd = -1; }
     return 0;
 }
 
@@ -219,6 +255,7 @@ int readbatch_mode(int argc, char **argv) {
  */
 int snapshot_mode(int argc, char **argv) {
     int pid = atoi(argv[2]);
+    open_mem_fd(pid);
     int slot_size = atoi(argv[3]);
     int step = atoi(argv[4]);
 
@@ -267,6 +304,7 @@ int snapshot_mode(int argc, char **argv) {
     printf("# capped:%d\n", capped);
 
     free(chunk);
+    if (g_mem_fd >= 0) { close(g_mem_fd); g_mem_fd = -1; }
     return 0;
 }
 

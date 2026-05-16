@@ -14,6 +14,7 @@ object MemoryReader {
 
     private var nativeHelperPath: String = ""
     private var pythonAvailable: Boolean = true
+    private var pythonBinary: String = "python3"
 
     val isPythonAvailable: Boolean get() = pythonAvailable
     val isNativeHelperReady: Boolean get() = nativeHelperPath.isNotEmpty()
@@ -56,9 +57,22 @@ object MemoryReader {
         }
         nativeHelperPath = dest.absolutePath
 
-        val pyCheck = Shell.cmd("command -v python3 >/dev/null 2>&1 && echo ok || command -v python >/dev/null 2>&1 && echo ok").exec()
-        pythonAvailable = pyCheck.out.any { it.trim() == "ok" }
-        AppLogger.d(TAG, "Native helper: $nativeHelperPath, Python available: $pythonAvailable")
+        // Detect Python — check PATH first, then known Termux locations
+        val pyPaths = listOf(
+            "python3", "python",
+            "/data/data/com.termux/files/usr/bin/python3",
+            "/data/data/com.termux/files/usr/bin/python"
+        )
+        pythonAvailable = false
+        for (py in pyPaths) {
+            val check = Shell.cmd("$py -c 'print(\"ok\")' 2>/dev/null").exec()
+            if (check.out.any { it.trim() == "ok" }) {
+                pythonBinary = py
+                pythonAvailable = true
+                break
+            }
+        }
+        AppLogger.d(TAG, "Native helper: $nativeHelperPath, Python available: $pythonAvailable ($pythonBinary)")
     }
 
     /**
@@ -77,9 +91,8 @@ object MemoryReader {
                 AppLogger.e(TAG, "Failed to write $tag script", e)
                 return@withContext ScriptResult(emptyList(), emptyMap())
             }
-            // Try python3 first, fall back to python if python3 binary is not found
             val result = Shell.cmd(
-                "if command -v python3 >/dev/null 2>&1; then python3 $scriptFile 2>/dev/null; else python $scriptFile 2>/dev/null; fi; rm -f $scriptFile"
+                "$pythonBinary $scriptFile 2>/dev/null; rm -f $scriptFile"
             ).exec()
             val stdout = mutableListOf<String>()
             val meta = mutableMapOf<String, String>()
@@ -302,7 +315,7 @@ print('# capped:' + ('1' if found >= cap else '0'))
         if (requests.isEmpty()) return@withContext emptyList()
         val out = arrayOfNulls<ByteArray>(requests.size)
         // Batch to keep script / command size under ~1 MB (~50K requests per batch)
-        val batchSize = if (pythonAvailable) 50_000 else 10_000
+        val batchSize = if (pythonAvailable) 50_000 else 2_000
         for ((batchIndex, batch) in requests.chunked(batchSize).withIndex()) {
             val res = if (pythonAvailable) {
                 val reqList = batch.joinToString(",") { "(${it.first},${it.second})" }
@@ -352,13 +365,17 @@ os.close(fd)
     ): List<Pair<Long, ByteArray>> = withContext(Dispatchers.IO) {
         if (addresses.isEmpty()) return@withContext emptyList()
         val allResults = mutableListOf<Pair<Long, ByteArray>>()
-        val batchSize = 10_000
+        val batchSize = if (pythonAvailable) 50_000 else 2_000
+        var sampleLogged = false
+
         for (batch in addresses.chunked(batchSize)) {
             val reqs = batch.map { it to pattern.size }
             val bytesList = readBytesBatch(pid, reqs)
-            var sampleLogged = false
+
+            var nullCount = 0
             batch.forEachIndexed { idx, addr ->
-                val bytes = bytesList[idx] ?: return@forEachIndexed
+                val bytes = bytesList[idx]
+                if (bytes == null) { nullCount++; return@forEachIndexed }
                 if (bytes.size != pattern.size) return@forEachIndexed
                 val match = if (wildcard != null) {
                     bytes.indices.all { j -> pattern[j] == wildcard || bytes[j] == pattern[j] }
@@ -372,6 +389,7 @@ os.close(fd)
                     sampleLogged = true
                 }
             }
+            if (nullCount > 0) AppLogger.d(TAG, "refinedScanBatch nullReads=$nullCount/${batch.size}")
         }
         allResults
     }
@@ -399,9 +417,11 @@ os.close(fd)
             val reqs = batch.map { it.first to it.third }
             val bytesList = readBytesBatch(pid, reqs)
 
+            var nullCount = 0
             for ((idx, triple) in batch.withIndex()) {
                 val (addr, prevBytes, size) = triple
-                val newBytes = bytesList[idx] ?: continue
+                val newBytes = bytesList[idx]
+                if (newBytes == null) { nullCount++; continue }
                 if (newBytes.size != size) continue
                 val keep = when (op) {
                     "CHANGED" -> !newBytes.contentEquals(prevBytes)
@@ -410,6 +430,7 @@ os.close(fd)
                 }
                 if (keep) allResults.add(addr to newBytes)
             }
+            if (nullCount > 0) AppLogger.d(TAG, "compareBatch nullReads=$nullCount/${batch.size}")
             processed += batch.size
             onProgress?.invoke(processed, allResults.size)
         }
