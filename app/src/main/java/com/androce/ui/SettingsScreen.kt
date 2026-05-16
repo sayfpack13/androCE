@@ -188,6 +188,7 @@ fun SettingsScreen() {
     var maxResults by remember { mutableIntStateOf(AppPrefs.maxResults) }
     var maxResultsText by remember { mutableStateOf(AppPrefs.maxResults.toString()) }
     var defaultFilter by remember { mutableStateOf(AppPrefs.defaultRegionFilter) }
+    var scanEngine by remember { mutableStateOf(AppPrefs.scanEngine) }
     var freezeMs by remember { mutableLongStateOf(AppPrefs.freezeIntervalMs) }
     var showClearLogDialog by remember { mutableStateOf(false) }
 
@@ -247,13 +248,14 @@ fun SettingsScreen() {
         when (selectedTab) {
             0 -> StatusTab(padding, requirements, checking, ::runChecks)
             1 -> ScanTab(
-                padding, autoRefreshMs, maxResultsText, defaultFilter, freezeMs,
+                padding, autoRefreshMs, maxResultsText, defaultFilter, scanEngine, freezeMs,
                 onAutoRefreshChanged = { autoRefreshMs = it; AppPrefs.autoRefreshIntervalMs = it },
                 onMaxResultsChanged = { text, value ->
                     maxResultsText = text
                     if (value != null) { maxResults = value; AppPrefs.maxResults = value }
                 },
                 onFilterChanged = { defaultFilter = it; AppPrefs.defaultRegionFilter = it },
+                onEngineChanged = { scanEngine = it; AppPrefs.scanEngine = it },
                 onFreezeChanged = { freezeMs = it; AppPrefs.freezeIntervalMs = it }
             )
             2 -> GeneralTab(padding, context, showClearLogDialog, onShowClearLog = { showClearLogDialog = it })
@@ -341,10 +343,12 @@ private fun ScanTab(
     autoRefreshMs: Long,
     maxResultsText: String,
     defaultFilter: String,
+    scanEngine: String,
     freezeMs: Long,
     onAutoRefreshChanged: (Long) -> Unit,
     onMaxResultsChanged: (String, Int?) -> Unit,
     onFilterChanged: (String) -> Unit,
+    onEngineChanged: (String) -> Unit,
     onFreezeChanged: (Long) -> Unit
 ) {
     Column(
@@ -392,6 +396,17 @@ private fun ScanTab(
                 options = listOf("all" to "All", "heap_stack_anon" to "Heap / Stack / Anon"),
                 selected = defaultFilter,
                 onSelected = onFilterChanged
+            )
+            Spacer(Modifier.height(12.dp))
+            SettingsDropdown(
+                label = "Scan engine",
+                options = listOf(
+                    "auto" to "Auto (Python if available)",
+                    "python" to "Python (/proc/pid/mem)",
+                    "native" to "Native C (/proc/pid/mem + fallback)"
+                ),
+                selected = scanEngine,
+                onSelected = onEngineChanged
             )
         }
 

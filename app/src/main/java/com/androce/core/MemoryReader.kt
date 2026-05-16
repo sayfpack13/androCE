@@ -19,6 +19,13 @@ object MemoryReader {
     val isPythonAvailable: Boolean get() = pythonAvailable
     val isNativeHelperReady: Boolean get() = nativeHelperPath.isNotEmpty()
 
+    /** Whether to use Python for scanning, respecting the user's scan engine preference */
+    val usePython: Boolean get() = when (AppPrefs.scanEngine) {
+        "python" -> pythonAvailable
+        "native" -> false
+        else -> pythonAvailable  // "auto" — prefer Python if available
+    }
+
     fun init(context: Context) {
         var dest = File(context.filesDir, "memscan")
         try {
@@ -57,21 +64,32 @@ object MemoryReader {
         }
         nativeHelperPath = dest.absolutePath
 
-        // Detect Python — check PATH first, then known Termux locations
-        val pyPaths = listOf(
-            "python3", "python",
-            "/data/data/com.termux/files/usr/bin/python3",
-            "/data/data/com.termux/files/usr/bin/python"
-        )
+        // Set SELinux permissive — required for accessing Termux Python from root shell
+        Shell.cmd("setenforce 0").exec()
+
+        // Detect Python — check system PATH first
         pythonAvailable = false
-        for (py in pyPaths) {
-            val check = Shell.cmd("$py -c 'print(\"ok\")' 2>/dev/null").exec()
-            if (check.out.any { it.trim() == "ok" }) {
+        for (py in listOf("python3", "python")) {
+            val check = Shell.cmd("$py --version 2>&1").exec()
+            if (check.out.any { it.trim().startsWith("Python") }) {
                 pythonBinary = py
                 pythonAvailable = true
                 break
             }
         }
+
+        // If not found, try Termux Python via nsenter (PID 1 mount namespace)
+        if (!pythonAvailable) {
+            val termuxPrefix = "/data/data/com.termux/files/usr"
+            val pyCmd = "nsenter -t 1 -m -- /system/bin/env LD_LIBRARY_PATH=$termuxPrefix/lib PYTHONHOME=$termuxPrefix $termuxPrefix/bin/python3"
+            val setup = Shell.cmd("$pyCmd --version 2>&1").exec()
+            if (setup.out.any { it.trim().startsWith("Python") }) {
+                pythonBinary = pyCmd
+                pythonAvailable = true
+            }
+        }
+
+        if (pythonAvailable) AppLogger.d(TAG, "Python found: $pythonBinary")
         AppLogger.d(TAG, "Native helper: $nativeHelperPath, Python available: $pythonAvailable ($pythonBinary)")
     }
 
@@ -88,8 +106,9 @@ object MemoryReader {
             try {
                 java.io.File(scriptFile).writeText(scriptBody)
             } catch (e: Exception) {
-                AppLogger.e(TAG, "Failed to write $tag script", e)
-                return@withContext ScriptResult(emptyList(), emptyMap())
+                // App filesDir not writable — write via root shell
+                val escaped = scriptBody.replace("'", "'\\''")
+                Shell.cmd("echo '$escaped' > $scriptFile").exec()
             }
             val result = Shell.cmd(
                 "$pythonBinary $scriptFile 2>/dev/null; rm -f $scriptFile"
@@ -134,7 +153,7 @@ object MemoryReader {
         nativeMode: String,
         nativeArgs: List<String>
     ): ScriptResult {
-        return if (pythonAvailable) {
+        return if (usePython) {
             // TODO: runPythonScript runs in suspend context, but we need a blocking version here.
             // For now, just run synchronously via Shell for native fallback path.
             ScriptResult(emptyList(), emptyMap()) // placeholder - actual callers handle this
@@ -179,7 +198,7 @@ object MemoryReader {
     suspend fun readBytes(pid: Int, address: Long, length: Int): ByteArray? =
         withContext(Dispatchers.IO) {
             try {
-                val res = if (pythonAvailable) {
+                val res = if (usePython) {
                     val scriptBody = """
 import os
 try:
@@ -222,7 +241,7 @@ except Exception:
         val wildcardHex = wildcard?.let { "%02x".format(it) } ?: "none"
         val regionList = regions.joinToString(",") { "(${it.startAddress},${it.size})" }
 
-        val res = if (pythonAvailable) {
+        val res = if (usePython) {
             val scriptBody = if (wildcard == null) {
                 """
 import os
@@ -315,9 +334,9 @@ print('# capped:' + ('1' if found >= cap else '0'))
         if (requests.isEmpty()) return@withContext emptyList()
         val out = arrayOfNulls<ByteArray>(requests.size)
         // Batch to keep script / command size under ~1 MB (~50K requests per batch)
-        val batchSize = if (pythonAvailable) 50_000 else 2_000
+        val batchSize = if (usePython) 50_000 else 2_000
         for ((batchIndex, batch) in requests.chunked(batchSize).withIndex()) {
-            val res = if (pythonAvailable) {
+            val res = if (usePython) {
                 val reqList = batch.joinToString(",") { "(${it.first},${it.second})" }
                 val scriptBody = """
 import os
@@ -365,7 +384,7 @@ os.close(fd)
     ): List<Pair<Long, ByteArray>> = withContext(Dispatchers.IO) {
         if (addresses.isEmpty()) return@withContext emptyList()
         val allResults = mutableListOf<Pair<Long, ByteArray>>()
-        val batchSize = if (pythonAvailable) 50_000 else 2_000
+        val batchSize = if (usePython) 50_000 else 2_000
         var sampleLogged = false
 
         for (batch in addresses.chunked(batchSize)) {
@@ -511,7 +530,7 @@ os.close(fd)
     ): Triple<List<Pair<Long, ByteArray>>, Int, Boolean> = withContext(Dispatchers.IO) {
         if (regions.isEmpty() || slotSize <= 0) return@withContext Triple(emptyList(), 0, false)
         val regionList = regions.joinToString(",") { "(${it.startAddress},${it.size})" }
-        val res = if (pythonAvailable) {
+        val res = if (usePython) {
             val scriptBody = """
 import os
 fd = os.open('/proc/$pid/mem', os.O_RDONLY)
@@ -571,7 +590,7 @@ print('# capped:' + ('1' if found >= cap else '0'))
         writes: List<Pair<Long, ByteArray>>
     ): Boolean = withContext(Dispatchers.IO) {
         if (writes.isEmpty()) return@withContext true
-        val res = if (pythonAvailable) {
+        val res = if (usePython) {
             val list = writes.joinToString(",") {
                 "(${it.first},'${it.second.joinToString("") { b -> "%02x".format(b) }}')"
             }

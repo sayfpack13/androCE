@@ -30,6 +30,11 @@ object AppPrefs {
         get() = prefs.getString("default_region_filter", "all") ?: "all"
         set(value) = prefs.edit().putString("default_region_filter", value).apply()
 
+    /** Scan engine: "auto", "python", "native". Default "auto". */
+    var scanEngine: String
+        get() = prefs.getString("scan_engine", "auto") ?: "auto"
+        set(value) = prefs.edit().putString("scan_engine", value).apply()
+
     // --- Freeze Settings ---
 
     /** Freeze write interval in milliseconds. Default 100. */
