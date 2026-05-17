@@ -53,4 +53,21 @@ object AppPrefs {
     var autoEnableSpeedHack: Boolean
         get() = prefs.getBoolean("auto_enable_speed_hack", false)
         set(value) = prefs.edit().putBoolean("auto_enable_speed_hack", value).apply()
+
+    // --- Floating Icon Settings ---
+
+    /** Show floating icon overlay. Default false. */
+    var floatingIconEnabled: Boolean
+        get() = prefs.getBoolean("floating_icon_enabled", false)
+        set(value) = prefs.edit().putBoolean("floating_icon_enabled", value).apply()
+
+    /** Last X position of floating icon. Default -1 (unset). */
+    var floatingIconX: Int
+        get() = prefs.getInt("floating_icon_x", -1)
+        set(value) = prefs.edit().putInt("floating_icon_x", value).apply()
+
+    /** Last Y position of floating icon. Default -1 (unset). */
+    var floatingIconY: Int
+        get() = prefs.getInt("floating_icon_y", -1)
+        set(value) = prefs.edit().putInt("floating_icon_y", value).apply()
 }

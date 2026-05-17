@@ -164,11 +164,14 @@ static unsigned long find_sym_in_maps(int pid, const char *lib_substr, const cha
 enum dlopen_kind {
     DLOPEN_2ARG = 0,
     DLOPEN_LOADER_3ARG = 1,
-    DLOPEN_SHELLCODE = 2, /* PC at cave; args already in the stub */
+    DLOPEN_SHELLCODE = 2, /* PC at stub; args in the stub */
+    REMOTE_MMAP_6ARG = 3,
 };
 
-#define REMOTE_CALL_TIMEOUT_MS 12000
+#define REMOTE_CALL_TIMEOUT_MS 8000
 #define REMOTE_CALL_POLL_MS    50
+#define INJECT_PAGE_SIZE       4096
+#define INJECT_PATH_OFF        0x40
 
 struct dlopen_target {
     unsigned long addr;
@@ -259,9 +262,11 @@ static unsigned long find_rw_region(int pid, unsigned long *out_size) {
 
 static int is_plausible_dlopen_handle(unsigned long long h) {
     if (h == 0 || h == (unsigned long long)-1) return 0;
-    if (h & 7ULL) return 0;
-    if (h < 0x10000ULL) return 0;
-    if (h > 0x0000FFFFFFFFFFFFULL) return 0;
+    /* Strip MTE / HWASan tag from upper byte before validation */
+    unsigned long long untagged = h & 0x00FFFFFFFFFFFFFFULL;
+    if (untagged == 0) return 0;
+    if (untagged & 7ULL) return 0;
+    if (untagged < 0x10000ULL) return 0;
     return 1;
 }
 
@@ -446,9 +451,9 @@ static int write_dlopen_cave(int pid, unsigned long cave, unsigned long dlopen_a
     unsigned char blob[40];
     memset(blob, 0, sizeof(blob));
     uint32_t *sc = (uint32_t *)blob;
-    sc[0] = 0x580000c0U; /* ldr x0, #path_ptr @ 0x1c */
+    sc[0] = 0x580000e0U; /* ldr x0, #path_ptr @ 0x1c (offset 28 bytes = 7*4) */
     sc[1] = 0x52800041U; /* mov w1, #RTLD_NOW */
-    sc[2] = 0x58000051U; /* ldr x17, #fn @ 0x14 */
+    sc[2] = 0x58000031U; /* ldr x17, [pc+0x0c] -> dlopen @ 0x14 (imm19=3, Rt=17) */
     sc[3] = 0xd63f0220U; /* blr x17 */
     sc[4] = 0xd4200000U; /* brk #0 */
     memcpy(blob + 0x14, &dlopen_addr, sizeof(dlopen_addr));
@@ -476,7 +481,14 @@ static int arm64_remote_call(int tid, const struct dlopen_target *target,
     new_regs = orig_regs;
     new_regs.pc = target->addr;
     if (target->kind == DLOPEN_SHELLCODE) {
-        /* Stub sets x0/x1/x17 from literals in the RX cave. */
+        /* Stub sets x0/x1/x17 from literals in the RX page. */
+    } else if (target->kind == REMOTE_MMAP_6ARG) {
+        new_regs.regs[0] = 0;
+        new_regs.regs[1] = INJECT_PAGE_SIZE;
+        new_regs.regs[2] = 7; /* PROT_READ|WRITE|EXEC */
+        new_regs.regs[3] = 0x22; /* MAP_PRIVATE|MAP_ANONYMOUS */
+        new_regs.regs[4] = (unsigned long)-1;
+        new_regs.regs[5] = 0;
     } else {
         new_regs.regs[0] = path_addr;
         new_regs.regs[1] = RTLD_NOW;
@@ -497,6 +509,8 @@ static int arm64_remote_call(int tid, const struct dlopen_target *target,
     int status = 0;
     int waited = 0;
     pid_t w = 0;
+    int reg_tid = tid;
+retry_wait:
     while (waited < REMOTE_CALL_TIMEOUT_MS) {
         w = waitpid(-1, &status, __WALL | WNOHANG | WUNTRACED);
         if (w > 0) break;
@@ -516,26 +530,51 @@ static int arm64_remote_call(int tid, const struct dlopen_target *target,
         return -2;
     }
 
-    int reg_tid = (w == tid) ? tid : (int)w;
+    /* Handle non-fatal signals (e.g. SIGCHLD) by suppressing and re-continuing */
+    if (WIFSTOPPED(status)) {
+        int sig = WSTOPSIG(status);
+        reg_tid = (w == tid) ? tid : (int)w;
+        iov.iov_base = &result_regs;
+        ptrace(PTRACE_GETREGSET, reg_tid, (void *)(long)NT_PRSTATUS, &iov);
+
+        /* BRK #0 on ARM64 Linux generates SIGILL — treat as expected stop if PC matches */
+        unsigned long brk_pc = target->addr + 0x10U;
+        int is_brk_stop = (sig == SIGILL && result_regs.pc == brk_pc);
+
+        if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGILL) && !is_brk_stop) {
+            LOGE("Remote dlopen crashed (%s) sig=%d pc=0x%llx x0=0x%llx", method_tag, sig,
+                 (unsigned long long)result_regs.pc,
+                 (unsigned long long)result_regs.regs[0]);
+            iov.iov_base = &orig_regs;
+            ptrace(PTRACE_SETREGSET, reg_tid, (void *)(long)NT_PRSTATUS, &iov);
+            return -1;
+        }
+        if (sig != SIGTRAP && sig != SIGSTOP && !is_brk_stop) {
+            LOGI("Suppressing signal %d during remote call (%s), continuing", sig, method_tag);
+            ptrace(PTRACE_CONT, w > 0 ? (int)w : tid, NULL, NULL);
+            w = 0;
+            goto retry_wait;
+        }
+    }
+
+    reg_tid = (w == tid) ? tid : (int)w;
     iov.iov_base = &result_regs;
     ptrace(PTRACE_GETREGSET, reg_tid, (void *)(long)NT_PRSTATUS, &iov);
     if (out_x0) *out_x0 = result_regs.regs[0];
+    LOGI("Remote call (%s) returned: x0=0x%llx pc=0x%llx", method_tag,
+         (unsigned long long)result_regs.regs[0],
+         (unsigned long long)result_regs.pc);
 
     iov.iov_base = &orig_regs;
     ptrace(PTRACE_SETREGSET, reg_tid, (void *)(long)NT_PRSTATUS, &iov);
 
-    if (WIFSTOPPED(status)) {
-        int sig = WSTOPSIG(status);
-        if (sig == SIGSEGV || sig == SIGBUS || sig == SIGILL) {
-            LOGE("Remote dlopen crashed (%s) sig=%d pc=0x%llx x0=0x%llx", method_tag, sig,
-                 (unsigned long long)result_regs.pc,
+    if (target->kind == REMOTE_MMAP_6ARG) {
+        if (result_regs.regs[0] < 0x10000ULL) {
+            LOGE("Remote mmap (%s) failed x0=0x%llx", method_tag,
                  (unsigned long long)result_regs.regs[0]);
             return -1;
         }
-        if (sig != SIGTRAP && sig != SIGSTOP) {
-            LOGE("Unexpected signal %d after remote call (%s)", sig, method_tag);
-            return -1;
-        }
+        return 0;
     }
 
     if (!is_plausible_dlopen_handle(result_regs.regs[0])) {
@@ -545,6 +584,60 @@ static int arm64_remote_call(int tid, const struct dlopen_target *target,
     }
 
     return 0;
+}
+
+static int build_dlopen_stub(unsigned char *page, unsigned long page_addr,
+                             unsigned long dlopen_addr, const char *lib_path) {
+    memset(page, 0, INJECT_PAGE_SIZE);
+    uint32_t *sc = (uint32_t *)page;
+    sc[0] = 0x580000e0U; /* ldr x0, #0x1c -> path ptr (offset 28 bytes = 7*4) */
+    sc[1] = 0x52800041U; /* mov w1, #RTLD_NOW */
+    sc[2] = 0x58000031U; /* ldr x17, [pc+0x0c] -> dlopen @ 0x14 (imm19=3, Rt=17) */
+    sc[3] = 0xd63f0220U; /* blr x17 */
+    sc[4] = 0xd4200000U; /* brk #0 */
+    memcpy(page + 0x14, &dlopen_addr, sizeof(dlopen_addr));
+
+    unsigned long path_ptr = page_addr + INJECT_PATH_OFF;
+    memcpy(page + 0x1c, &path_ptr, sizeof(path_ptr));
+    size_t path_len = strlen(lib_path) + 1;
+    if (INJECT_PATH_OFF + path_len >= INJECT_PAGE_SIZE) return -1;
+    memcpy(page + INJECT_PATH_OFF, lib_path, path_len);
+    return 0;
+}
+
+static int inject_via_mmap_page(int pid, int tid, unsigned long dlopen_addr,
+                                unsigned long stop_pc, const char *lib_path) {
+    unsigned long mmap_addr = find_sym_in_maps(pid, "libc.so", "mmap");
+    if (!mmap_addr) mmap_addr = find_sym_in_maps(pid, "libc.so", "mmap64");
+    if (!mmap_addr) {
+        LOGE("mmap symbol not found");
+        return -1;
+    }
+
+    struct dlopen_target mmap_fn = { .addr = mmap_addr, .kind = REMOTE_MMAP_6ARG };
+    unsigned long long remote_page = 0;
+    if (arm64_remote_call(tid, &mmap_fn, 0, stop_pc, &remote_page, "mmap") != 0) {
+        return -1;
+    }
+
+    unsigned char page[INJECT_PAGE_SIZE];
+    if (build_dlopen_stub(page, (unsigned long)remote_page, dlopen_addr, lib_path) < 0) {
+        LOGE("library path too long for inject page");
+        return -1;
+    }
+
+    if (remote_write(pid, (unsigned long)remote_page, page, INJECT_PAGE_SIZE) < 0) {
+        LOGE("failed to write inject page");
+        return -1;
+    }
+
+    struct dlopen_target stub = { .addr = (unsigned long)remote_page, .kind = DLOPEN_SHELLCODE };
+    unsigned long long dlopen_ret = 0;
+    if (arm64_remote_call(tid, &stub, 0, stop_pc, &dlopen_ret, "stub") != 0) {
+        return -1;
+    }
+
+    return is_lib_loaded(pid, "libspeedhook") ? 0 : -1;
 }
 
 static unsigned long cached_stop_pid;
@@ -597,23 +690,6 @@ static int arm64_try_direct_dlopen(int tid, const struct dlopen_target *target,
     return arm64_remote_call(tid, target, path_addr, stop_pc, out_ret, tag);
 }
 
-/* Let non-inject threads run so linker mutexes are not held while frozen. */
-static void resume_other_threads(int pid, int inject_tid) {
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/task", pid);
-    DIR *d = opendir(path);
-    if (!d) return;
-
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] < '1') continue;
-        int t = (int)strtol(ent->d_name, NULL, 10);
-        if (t <= 0 || t == inject_tid) continue;
-        ptrace(PTRACE_CONT, t, NULL, 0);
-    }
-    closedir(d);
-}
-
 static void detach_all_threads(int pid, int inject_tid) {
     restore_cave_if_needed(pid);
 
@@ -635,25 +711,24 @@ static void detach_all_threads(int pid, int inject_tid) {
     }
 }
 
-static int try_dlopen_and_verify(int pid, int tid, const struct dlopen_target *target,
-                                 unsigned long path_addr, unsigned long stop_pc,
-                                 unsigned long long *out_ret, const char *tag) {
-    int r = arm64_remote_call(tid, target, path_addr, stop_pc, out_ret, tag);
-    if (r == -2) return -2;
-    if (r != 0) return -1;
-    if (!is_lib_loaded(pid, "libspeedhook")) {
-        LOGE("(%s) handle=0x%llx but libspeedhook.so not in maps", tag,
-             (unsigned long long)*out_ret);
-        return -1;
-    }
-    return 0;
-}
-
 int inject_library(int pid, const char *lib_path) {
     char msg[256];
 
     snprintf(msg, sizeof(msg), "ANDROCE_INJECT: start pid=%d lib=%s", pid, lib_path);
     out(msg);
+
+    /* Check SELinux status */
+    FILE *selinux = fopen("/sys/fs/selinux/enforce", "r");
+    if (selinux) {
+        int enforce = 0;
+        if (fscanf(selinux, "%d", &enforce) == 1) {
+            LOGI("SELinux enforce=%d (0=permissive, 1=enforcing)", enforce);
+            if (enforce == 1) {
+                out("ANDROCE_INJECT: WARNING SELinux is enforcing - injection may fail");
+            }
+        }
+        fclose(selinux);
+    }
 
     if (access(lib_path, R_OK) != 0) {
         snprintf(msg, sizeof(msg), "ANDROCE_INJECT: FAIL library not readable: %s", strerror(errno));
@@ -683,30 +758,45 @@ int inject_library(int pid, const char *lib_path) {
              dlopen_target.addr, dlopen_target.kind);
     out(msg);
 
+    /* Try to clean up stale attachment from previous failed attempt */
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    usleep(20000);
+
+    LOGI("Attaching to pid %d", pid);
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
         snprintf(msg, sizeof(msg), "ANDROCE_INJECT: FAIL ptrace attach: %s", strerror(errno));
         out(msg);
         return -1;
     }
+    LOGI("Attached successfully, waiting for stop");
 
     int status = 0;
-    pid_t inject_tid = waitpid(pid, &status, __WALL | WUNTRACED);
-    if (inject_tid < 0 || !WIFSTOPPED(status)) {
-        out("ANDROCE_INJECT: FAIL process did not stop");
+    LOGI("Waiting for process to stop...");
+    pid_t inject_tid = 0;
+    int waited = 0;
+    while (waited < 5000) {
+        inject_tid = waitpid(pid, &status, __WALL | WNOHANG | WUNTRACED);
+        if (inject_tid > 0) break;
+        if (inject_tid < 0 && errno != ECHILD) {
+            LOGE("waitpid error: %s", strerror(errno));
+            break;
+        }
+        usleep(100000);
+        waited += 100;
+    }
+    
+    if (inject_tid <= 0 || !WIFSTOPPED(status)) {
+        LOGE("Process did not stop after %dms: inject_tid=%d status=0x%x errno=%s", 
+             waited, inject_tid, status, strerror(errno));
+        out("ANDROCE_INJECT: FAIL process did not stop (timeout)");
         ptrace(PTRACE_DETACH, pid, NULL, (void *)(long)SIGCONT);
         return -1;
     }
 
+    LOGI("Process stopped, inject_tid=%d", inject_tid);
     char msg_tid[128];
     snprintf(msg_tid, sizeof(msg_tid), "ANDROCE_INJECT: stopped tid=%d", inject_tid);
     out(msg_tid);
-
-    unsigned long path_addr = 0;
-    if (arm64_prepare_path(pid, lib_path, &path_addr) < 0) {
-        ptrace(PTRACE_DETACH, inject_tid, NULL, (void *)(long)SIGCONT);
-        out("ANDROCE_INJECT: FAIL could not write library path");
-        return -1;
-    }
 
     unsigned long stop_pc = get_stop_pc(pid);
     if (!stop_pc) {
@@ -715,56 +805,42 @@ int inject_library(int pid, const char *lib_path) {
         return -1;
     }
 
-    resume_other_threads(pid, inject_tid);
-
-    unsigned long long dlopen_ret = 0;
-    int inject_result = -1;
-    int timed_out = 0;
-
-    struct dlopen_target libdl_target = {0};
-    libdl_target.addr = find_sym_in_maps(pid, "libdl.so", "dlopen");
-    if (!libdl_target.addr) libdl_target.addr = find_sym_in_maps(pid, "libc.so", "dlopen");
-    libdl_target.kind = DLOPEN_2ARG;
-
-    if (libdl_target.addr) {
-        inject_result = try_dlopen_and_verify(pid, inject_tid, &libdl_target, path_addr,
-                                              stop_pc, &dlopen_ret, "libdl");
-        if (inject_result == -2) timed_out = 1;
-    }
-
-    if (inject_result < 0 && !timed_out && libdl_target.addr) {
-        int cave_r = arm64_try_cave_dlopen(pid, inject_tid, libdl_target.addr, path_addr,
-                                           stop_pc, &dlopen_ret);
-        if (cave_r == -2) {
-            timed_out = 1;
-        } else if (cave_r == 0 && is_lib_loaded(pid, "libspeedhook")) {
-            inject_result = 0;
+    unsigned long dlopen_addr = dlopen_target.addr;
+    unsigned long path_addr = 0;
+    
+    /* Try direct dlopen first (path in RW region) */
+    if (arm64_prepare_path(pid, lib_path, &path_addr) == 0) {
+        LOGI("Trying direct dlopen with path at 0x%lx", path_addr);
+        unsigned long long ret = 0;
+        if (arm64_try_direct_dlopen(inject_tid, &dlopen_target, path_addr, stop_pc, &ret, "direct") == 0) {
+            LOGI("Direct dlopen returned handle 0x%llx", ret);
+            if (is_lib_loaded(pid, "libspeedhook")) {
+                detach_all_threads(pid, inject_tid);
+                snprintf(msg, sizeof(msg), "ANDROCE_INJECT: OK lib loaded via direct dlopen");
+                out(msg);
+                return 0;
+            }
+        } else {
+            LOGI("Direct dlopen failed, trying mmap stub");
         }
+    } else {
+        LOGI("Could not prepare path in RW region, trying mmap stub");
     }
+    
+    /* Fallback to mmap stub method */
+    LOGI("Trying mmap stub method");
+    int inject_result = inject_via_mmap_page(pid, inject_tid, dlopen_addr, stop_pc, lib_path);
 
     detach_all_threads(pid, inject_tid);
 
-    if (timed_out) {
-        out("ANDROCE_INJECT: FAIL timeout (stay in androCE, game paused until inject finishes)");
-        return -1;
-    }
-
-    if (inject_result < 0 || !is_plausible_dlopen_handle(dlopen_ret)) {
+    if (inject_result < 0) {
         snprintf(msg, sizeof(msg),
-                 "ANDROCE_INJECT: FAIL handle=0x%llx (SELinux: try setenforce 0 in Settings)",
-                 dlopen_ret);
+                 "ANDROCE_INJECT: FAIL (try setenforce 0; keep game open in androCE when activating)");
         out(msg);
         return -1;
     }
 
-    usleep(200000);
-
-    if (!is_lib_loaded(pid, "libspeedhook")) {
-        out("ANDROCE_INJECT: FAIL library not in maps after dlopen");
-        return -1;
-    }
-
-    snprintf(msg, sizeof(msg), "ANDROCE_INJECT: OK handle=0x%llx", dlopen_ret);
+    snprintf(msg, sizeof(msg), "ANDROCE_INJECT: OK lib loaded via mmap stub");
     out(msg);
     return 0;
 }

@@ -1,8 +1,12 @@
 package com.androce
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.widget.Toast
 import com.topjohnwu.superuser.Shell
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -39,6 +43,11 @@ import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -79,6 +88,7 @@ import com.androce.ui.theme.Error
 import com.androce.ui.theme.Surface as SurfaceColor
 import com.androce.viewmodel.ProcessViewModel
 import com.androce.viewmodel.ScanViewModel
+import com.androce.core.AppPrefs
 
 class MainActivity : ComponentActivity() {
 
@@ -86,15 +96,89 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { /* granted or denied — freeze notification may not show on denial */ }
 
+    private val overlayPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        // Overlay permission result checked in SettingsScreen or next attempt
+    }
+
     private val bottomTab = mutableIntStateOf(0) // 0 = Process, 1 = Scanner, 2 = Results, 3 = Speed, 4 = Settings
     private val isLoading = mutableStateOf(true)
     private val hasRoot = mutableStateOf(false)
     private val showRootError = mutableStateOf(false)
 
+    fun canDrawOverlays(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(this)
+        } else {
+            true
+        }
+    }
+
+    fun requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            val intent = Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+            overlayPermissionLauncher.launch(intent)
+        }
+    }
+
+    fun startFloatingIconServiceIfEnabled() {
+        if (AppPrefs.floatingIconEnabled) {
+            if (canDrawOverlays()) {
+                startService(Intent(this, com.androce.core.FloatingIconService::class.java))
+            } else {
+                requestOverlayPermission()
+                Toast.makeText(this, "Grant overlay permission to show floating icon", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun stopFloatingIconService() {
+        stopService(Intent(this, com.androce.core.FloatingIconService::class.java))
+    }
+
+    private fun hideFloatingIcon() {
+        val intent = Intent(this, com.androce.core.FloatingIconService::class.java).apply {
+            action = com.androce.core.FloatingIconService.ACTION_HIDE
+        }
+        startService(intent)
+    }
+
+    private fun showFloatingIcon() {
+        val intent = Intent(this, com.androce.core.FloatingIconService::class.java).apply {
+            action = com.androce.core.FloatingIconService.ACTION_SHOW
+        }
+        startService(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Hide floating icon when app is in foreground
+        if (AppPrefs.floatingIconEnabled) {
+            hideFloatingIcon()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Show floating icon when app goes to background
+        if (AppPrefs.floatingIconEnabled) {
+            showFloatingIcon()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        // Auto-start floating icon if enabled and permission granted
+        if (AppPrefs.floatingIconEnabled && canDrawOverlays()) {
+            startService(Intent(this, com.androce.core.FloatingIconService::class.java))
         }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -147,6 +231,10 @@ class MainActivity : ComponentActivity() {
                     scanVm.initSpeedInjector(context)
                     // Bind freeze service
                     scanVm.bindFreezeService(context)
+                    // Auto-start floating icon if enabled and root granted
+                    if (AppPrefs.floatingIconEnabled && canDrawOverlays()) {
+                        startService(Intent(context, com.androce.core.FloatingIconService::class.java))
+                    }
                     // Minimum 500ms loading screen for smooth UX
                     delay(500)
                     loading = false
@@ -194,6 +282,40 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     containerColor = Background,
                     snackbarHost = { SnackbarHost(snackbarHostState) },
+                    topBar = {
+                        @OptIn(ExperimentalMaterial3Api::class)
+                        TopAppBar(
+                            title = { },
+                            navigationIcon = {
+                                IconButton(
+                                    onClick = { moveTaskToBack(true) }
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Speed,
+                                        contentDescription = "Minimize",
+                                        tint = Primary
+                                    )
+                                }
+                            },
+                            actions = {
+                                if (AppPrefs.floatingIconEnabled) {
+                                    TextButton(
+                                        onClick = { moveTaskToBack(true) }
+                                    ) {
+                                        Text(
+                                            "Back to Game",
+                                            color = Primary,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = Background
+                            )
+                        )
+                    },
                     bottomBar = {
                         Column(
                             modifier = Modifier

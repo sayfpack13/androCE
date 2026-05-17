@@ -165,9 +165,9 @@ object SpeedInjector {
             }
         } catch (_: TimeoutCancellationException) {
             Log.e(TAG, "FAIL pid=$pid $processName: shell timeout")
-            SpeedControl.setFailed(
-                "Injection timed out — stay in androCE until it finishes (don't open the game mid-inject)"
-            )
+                SpeedControl.setFailed(
+                    "Injection timed out — keep Subway Surfers open in background, stay in androCE"
+                )
             false
         } catch (e: Exception) {
             Log.e(TAG, "Injection failed", e)
@@ -191,9 +191,10 @@ object SpeedInjector {
         val gid = Shell.cmd("stat -c %g /proc/$pid").exec().out.firstOrNull()?.trim() ?: uid
 
         val destPaths = listOf(
-            TMP_LIB,
+            "/data/data/$packageName/lib/$LIB_NAME",
             "/data/user/0/$packageName/files/$LIB_NAME",
-            "/data/data/$packageName/files/$LIB_NAME"
+            "/data/data/$packageName/files/$LIB_NAME",
+            TMP_LIB
         )
 
         for (dest in destPaths) {

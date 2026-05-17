@@ -229,6 +229,7 @@ fun SettingsScreen() {
     var freezeMs by remember { mutableLongStateOf(AppPrefs.freezeIntervalMs) }
     var defaultSpeed by remember { mutableFloatStateOf(AppPrefs.defaultSpeedMultiplier) }
     var autoEnableSpeed by remember { mutableStateOf(AppPrefs.autoEnableSpeedHack) }
+    var floatingIconEnabled by remember { mutableStateOf(AppPrefs.floatingIconEnabled) }
     var showClearLogDialog by remember { mutableStateOf(false) }
 
     // --- Tab state ---
@@ -302,7 +303,20 @@ fun SettingsScreen() {
                 onDefaultSpeedChanged = { defaultSpeed = it; AppPrefs.defaultSpeedMultiplier = it },
                 onAutoEnableChanged = { autoEnableSpeed = it; AppPrefs.autoEnableSpeedHack = it }
             )
-            3 -> GeneralTab(padding, context, showClearLogDialog, onShowClearLog = { showClearLogDialog = it })
+            3 -> GeneralTab(
+                padding, context, floatingIconEnabled, showClearLogDialog,
+                onShowClearLog = { showClearLogDialog = it },
+                onFloatingIconChanged = { enabled ->
+                    floatingIconEnabled = enabled
+                    AppPrefs.floatingIconEnabled = enabled
+                    val activity = context as? com.androce.MainActivity
+                    if (enabled) {
+                        activity?.startFloatingIconServiceIfEnabled()
+                    } else {
+                        activity?.stopFloatingIconService()
+                    }
+                }
+            )
         }
     }
 
@@ -603,8 +617,10 @@ private fun SpeedTab(
 private fun GeneralTab(
     padding: androidx.compose.foundation.layout.PaddingValues,
     context: Context,
+    floatingIconEnabled: Boolean,
     showClearLogDialog: Boolean,
-    onShowClearLog: (Boolean) -> Unit
+    onShowClearLog: (Boolean) -> Unit,
+    onFloatingIconChanged: (Boolean) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -648,6 +664,33 @@ private fun GeneralTab(
                 Icon(Icons.Default.Delete, contentDescription = null, tint = Error, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Clear logs", color = Error, fontWeight = FontWeight.Medium)
+            }
+        }
+
+        // Floating Icon
+        SectionLabel("Floating Icon")
+        SettingsCard {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onFloatingIconChanged(!floatingIconEnabled) },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Show floating icon", color = OnBackground, fontSize = 14.sp)
+                    Text(
+                        "Keep a draggable shortcut on screen while playing",
+                        color = OnSurface,
+                        fontSize = 12.sp
+                    )
+                }
+                Icon(
+                    imageVector = if (floatingIconEnabled) Icons.Default.CheckCircle else Icons.Default.Error,
+                    contentDescription = null,
+                    tint = if (floatingIconEnabled) AccentGreen else OnSurface.copy(alpha = 0.3f),
+                    modifier = Modifier.size(24.dp)
+                )
             }
         }
 
