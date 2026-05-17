@@ -56,9 +56,9 @@ object AppPrefs {
 
     // --- Floating Icon Settings ---
 
-    /** Show floating icon overlay. Default false. */
+    /** Show floating icon overlay. Default true. */
     var floatingIconEnabled: Boolean
-        get() = prefs.getBoolean("floating_icon_enabled", false)
+        get() = prefs.getBoolean("floating_icon_enabled", true)
         set(value) = prefs.edit().putBoolean("floating_icon_enabled", value).apply()
 
     /** Last X position of floating icon. Default -1 (unset). */

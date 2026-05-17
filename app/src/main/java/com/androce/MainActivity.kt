@@ -287,17 +287,6 @@ class MainActivity : ComponentActivity() {
                         TopAppBar(
                             title = { },
                             navigationIcon = {
-                                IconButton(
-                                    onClick = { moveTaskToBack(true) }
-                                ) {
-                                    Icon(
-                                        Icons.Filled.Speed,
-                                        contentDescription = "Minimize",
-                                        tint = Primary
-                                    )
-                                }
-                            },
-                            actions = {
                                 if (AppPrefs.floatingIconEnabled) {
                                     TextButton(
                                         onClick = { moveTaskToBack(true) }
@@ -309,6 +298,17 @@ class MainActivity : ComponentActivity() {
                                             fontWeight = FontWeight.Medium
                                         )
                                     }
+                                }
+                            },
+                            actions = {
+                                IconButton(
+                                    onClick = { finish() }
+                                ) {
+                                    Icon(
+                                        Icons.Default.Error,
+                                        contentDescription = "Exit",
+                                        tint = Error
+                                    )
                                 }
                             },
                             colors = TopAppBarDefaults.topAppBarColors(
