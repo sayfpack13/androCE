@@ -1008,12 +1008,7 @@ class ScanViewModel : ViewModel() {
 
         viewModelScope.launch {
             if (!isCurrentProcess(pid)) return@launch
-            val success = SpeedInjector.inject(pid, processName)
-            if (success) {
-                AppLogger.d("ScanViewModel", "Speed hack activated for $processName")
-            } else {
-                AppLogger.e("ScanViewModel", "Speed hack activation failed")
-            }
+            SpeedInjector.inject(pid, processName)
         }
     }
 
@@ -1029,8 +1024,14 @@ class ScanViewModel : ViewModel() {
 
     fun deactivateSpeedHack() {
         SpeedInjector.reset()
-        AppLogger.d("ScanViewModel", "Speed hack deactivated")
     }
 
     fun isSpeedHackActive(): Boolean = SpeedControl.isActive()
+
+    fun refreshSpeedHackHealth() {
+        if (!SpeedControl.isActive()) return
+        viewModelScope.launch {
+            SpeedInjector.validateActiveInjection()
+        }
+    }
 }

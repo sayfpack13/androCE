@@ -93,6 +93,16 @@ fun SpeedControlScreen(
             sliderValue = speedState.speedMultiplier
         }
     }
+
+    // Detect game restart / hook loss while UI shows "active"
+    LaunchedEffect(speedState.state, selectedProcess?.pid) {
+        if (speedState.state != SpeedHackState.ACTIVE) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(2000)
+            viewModel.refreshSpeedHackHealth()
+            if (SpeedControl.state.value.state != SpeedHackState.ACTIVE) break
+        }
+    }
     
     Scaffold(
         topBar = {

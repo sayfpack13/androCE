@@ -26,12 +26,11 @@ object AppLogger {
         if (logFile!!.exists() && logFile!!.length() > MAX_FILE_SIZE) {
             logFile!!.delete()
         }
-        i("AppLogger", "Log file: ${logFile!!.absolutePath}")
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun d(tag: String, msg: String) {
-        Log.d("androCE.$tag", msg)
-        write("D", tag, msg)
+        /* debug logging disabled — use AppLogger.e for failures */
     }
 
     fun i(tag: String, msg: String) {

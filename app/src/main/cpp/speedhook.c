@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <errno.h>
+#include <pthread.h>
 
 #ifndef SYS_clock_gettime
 #define SYS_clock_gettime __NR_clock_gettime
@@ -20,7 +21,6 @@
 #endif
 
 #define LOG_TAG "SpeedHook"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 #define SHM_PATH "/data/local/tmp/speedhack_shm"
@@ -38,6 +38,7 @@ static time_fn orig_time = NULL;
 static volatile float g_speed_multiplier = DEFAULT_SPEED;
 static volatile int g_initialized = 0;
 static volatile int g_hook_active = 1;
+static volatile int g_hooks_installed = 0;
 
 static struct timespec g_base_monotonic = {0, 0};
 static struct timespec g_base_real = {0, 0};
@@ -63,7 +64,6 @@ static void update_speed_from_shm(void) {
             if (new_speed != g_speed_multiplier) {
                 init_base_times();
                 g_speed_multiplier = new_speed;
-                LOGD("Speed updated: %.2fx", g_speed_multiplier);
             }
         }
     }
@@ -186,14 +186,10 @@ static void install_hooks(void) {
     }
 
     dlclose(libc);
-    LOGD("Hooks installed: clock_gettime=%p gettimeofday=%p time=%p",
-         (void *)orig_clock_gettime, (void *)orig_gettimeofday, (void *)orig_time);
 }
 
-static void ensure_init(void) {
-    if (g_initialized) return;
-
-    init_base_times();
+static void open_shm_only(void) {
+    if (g_shm_speed != NULL) return;
 
     g_shm_fd = open(SHM_PATH, O_RDONLY);
     if (g_shm_fd >= 0) {
@@ -201,20 +197,45 @@ static void ensure_init(void) {
         if (g_shm_speed == MAP_FAILED) {
             g_shm_speed = NULL;
             LOGE("Failed to mmap shared memory");
-        } else {
-            LOGD("Shared memory mapped");
         }
     } else {
         LOGE("Failed to open shared memory: %s", strerror(errno));
     }
+}
 
+/* Install libc hooks only after the game is running (not during ptrace freeze). */
+static void *deferred_install_thread(void *arg) {
+    (void)arg;
+    usleep(2500000); /* 2.5s — let the process resume fully after injector detach */
+    if (g_hooks_installed) return NULL;
+
+    init_base_times();
     install_hooks();
+    g_hooks_installed = 1;
     g_initialized = 1;
-    LOGD("SpeedHook ready, speed=%.2f", g_speed_multiplier);
+    return NULL;
+}
+
+static void schedule_deferred_hooks(void) {
+    if (g_hooks_installed) return;
+
+    pthread_t th;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &attr, deferred_install_thread, NULL) != 0) {
+        LOGE("pthread_create for deferred hooks failed");
+    }
+    pthread_attr_destroy(&attr);
+}
+
+static void ensure_init(void) {
+    if (!g_initialized && g_hooks_installed) g_initialized = 1;
+    update_speed_from_shm();
 }
 
 __attribute__((constructor))
 static void speedhook_init(void) {
-    LOGD("SpeedHook library loaded");
-    ensure_init();
+    open_shm_only();
+    schedule_deferred_hooks();
 }

@@ -3,7 +3,9 @@ package com.androce.core
 import android.util.Log
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.File
 
 object SpeedInjector {
@@ -19,10 +21,6 @@ object SpeedInjector {
     fun init(context: android.content.Context) {
         val filesDir = context.filesDir
         val nativeLibDir = context.applicationInfo.nativeLibraryDir
-        val abi = android.os.Build.SUPPORTED_ABIS[0] ?: "arm64-v8a"
-
-        Log.d(TAG, "Init speed injector ABI=$abi nativeLibDir=$nativeLibDir")
-
         val possiblePaths = mutableListOf(
             File(nativeLibDir, LIB_NAME),
             File(filesDir, LIB_NAME)
@@ -38,8 +36,6 @@ object SpeedInjector {
         if (libraryPath == null) {
             extractLibraryFromApk(context)
         }
-        Log.d(TAG, "Library path: $libraryPath")
-
         // Remove stale root-owned copy that blocks app writes (EACCES on reinstall).
         Shell.cmd("rm -f '${File(filesDir, "speedinjector").absolutePath}'").exec()
         findOrExtractInjector(context)
@@ -70,7 +66,6 @@ object SpeedInjector {
 
         if (stageInjectorToTmp(context, abi)) {
             injectorPath = TMP_INJECTOR
-            Log.d(TAG, "Injector ready at $TMP_INJECTOR (abi=$abi)")
             return
         }
 
@@ -86,7 +81,6 @@ object SpeedInjector {
             ).exec()
             if (copy.isSuccess) {
                 injectorPath = TMP_INJECTOR
-                Log.d(TAG, "Injector staged via cache ($abi, ${cacheFile.length()} bytes)")
             } else {
                 Log.e(TAG, "Failed to copy injector to $TMP_INJECTOR: ${copy.err}")
             }
@@ -135,38 +129,46 @@ object SpeedInjector {
     suspend fun inject(pid: Int, processName: String): Boolean = withContext(Dispatchers.IO) {
         try {
             SpeedControl.setInjecting()
-
-            val libPath = libraryPath ?: run {
-                SpeedControl.setFailed("Speed hook library not found")
-                return@withContext false
-            }
-
-            val injector = injectorPath ?: run {
-                SpeedControl.setFailed("Injector binary not found — rebuild and reinstall the app")
-                return@withContext false
-            }
-
-            setupSharedMemory()
-
-            val injectLibPath = prepareLibraryForTarget(pid, processName, libPath)
-                ?: run {
-                    SpeedControl.setFailed("Could not prepare library for target process")
-                    return@withContext false
+            withTimeout(35_000) {
+                val libPath = libraryPath ?: run {
+                    SpeedControl.setFailed("Speed hook library not found")
+                    return@withTimeout false
                 }
 
-            val injection = performInjection(pid, injector, injectLibPath)
+                val injector = injectorPath ?: run {
+                    SpeedControl.setFailed("Injector binary not found — reinstall the app")
+                    return@withTimeout false
+                }
 
-            if (injection.success) {
-                writeSpeedToShm(SpeedControl.state.value.speedMultiplier)
-                SpeedControl.setActive(pid, processName)
-                Log.d(TAG, "Speed hack activated for $processName (pid=$pid)")
-            } else {
-                SpeedControl.setFailed(
-                    injection.error ?: "Injection failed — grant root, keep target app running, then retry"
-                )
+                setupSharedMemory()
+
+                val injectLibPath = prepareLibraryForTarget(pid, processName, libPath)
+                    ?: run {
+                        SpeedControl.setFailed("Could not prepare library for target process")
+                        return@withTimeout false
+                    }
+
+                val injection = performInjection(pid, injector, injectLibPath)
+
+                if (injection.success) {
+                    writeSpeedToShm(SpeedControl.state.value.speedMultiplier)
+                    SpeedControl.setActive(pid, processName)
+                    Log.i(TAG, "OK pid=$pid $processName")
+                } else {
+                    val msg = injection.error
+                        ?: "Injection failed — grant root, keep target app running, then retry"
+                    Log.e(TAG, "FAIL pid=$pid $processName: $msg")
+                    SpeedControl.setFailed(msg)
+                }
+
+                injection.success
             }
-
-            injection.success
+        } catch (_: TimeoutCancellationException) {
+            Log.e(TAG, "FAIL pid=$pid $processName: shell timeout")
+            SpeedControl.setFailed(
+                "Injection timed out — stay in androCE until it finishes (don't open the game mid-inject)"
+            )
+            false
         } catch (e: Exception) {
             Log.e(TAG, "Injection failed", e)
             SpeedControl.setFailed(e.message ?: "Unknown error")
@@ -189,21 +191,24 @@ object SpeedInjector {
         val gid = Shell.cmd("stat -c %g /proc/$pid").exec().out.firstOrNull()?.trim() ?: uid
 
         val destPaths = listOf(
-            "/data/user/0/$packageName/$LIB_NAME",
-            "/data/data/$packageName/$LIB_NAME",
-            TMP_LIB
+            TMP_LIB,
+            "/data/user/0/$packageName/files/$LIB_NAME",
+            "/data/data/$packageName/files/$LIB_NAME"
         )
 
         for (dest in destPaths) {
+            val parent = dest.substringBeforeLast('/')
             val cmd = buildString {
-                append("cp '$libPath' '$dest' && chmod 755 '$dest'")
-                if (dest != TMP_LIB) {
+                append("mkdir -p '$parent' && cp '$libPath' '$dest' && chmod 755 '$dest'")
+                if (dest == TMP_LIB) {
+                    append(" && chcon u:object_r:shell_data_file:s0 '$dest' 2>/dev/null || true")
+                } else {
                     append(" && chown $uid:$gid '$dest'")
+                    append(" && chcon u:object_r:app_data_file:s0 '$dest' 2>/dev/null || true")
                 }
             }
             val result = Shell.cmd(cmd).exec()
             if (result.isSuccess && Shell.cmd("test -r '$dest'").exec().isSuccess) {
-                Log.d(TAG, "Library staged at $dest (uid=$uid)")
                 return dest
             }
         }
@@ -254,8 +259,6 @@ object SpeedInjector {
     private data class InjectionResult(val success: Boolean, val error: String? = null)
 
     private fun performInjection(pid: Int, injector: String, libPath: String): InjectionResult {
-        Log.d(TAG, "Injecting pid=$pid lib=$libPath via $injector")
-
         val check = Shell.cmd("test -x '$injector'").exec()
         if (!check.isSuccess) {
             return InjectionResult(false, "Injector missing at $injector — reinstall the app")
@@ -263,23 +266,30 @@ object SpeedInjector {
 
         val result = Shell.cmd("'$injector' $pid '$libPath' 2>&1").exec()
         val output = (result.out + result.err).joinToString("\n")
-        Log.d(TAG, "Injector exit=${result.code}\n$output")
+        val injectLine = output.lines().firstOrNull { it.contains("ANDROCE_INJECT:") }
 
-        if (output.contains("ANDROCE_INJECT: OK") && verifyInjection(pid)) {
+        if (!output.contains("ANDROCE_INJECT: OK")) {
+            /* fall through to failure handling */
+        } else if (!verifyInjection(pid)) {
+            return InjectionResult(
+                false,
+                "Library not loaded into game — try setenforce 0, then activate again"
+            )
+        } else {
             return InjectionResult(true)
         }
 
         val failLine = output.lines().firstOrNull { it.contains("ANDROCE_INJECT: FAIL") }
         if (failLine != null) {
-            Log.e(TAG, failLine)
-        }
-
-        if (verifyInjection(pid)) {
-            return InjectionResult(true)
-        }
-
-        if (injectViaDebugger(pid, libPath) && verifyInjection(pid)) {
-            return InjectionResult(true)
+            Log.e(TAG, failLine.trim())
+            if (failLine.contains("timeout", ignoreCase = true)) {
+                return InjectionResult(
+                    false,
+                    "Timed out — stay in androCE until inject completes"
+                )
+            }
+        } else if (injectLine != null) {
+            Log.e(TAG, injectLine.trim())
         }
 
         val detail = failLine?.substringAfter("FAIL")?.trim()?.ifBlank { null }
@@ -293,7 +303,6 @@ object SpeedInjector {
         val gdbCheck = Shell.cmd("which gdb 2>/dev/null").exec()
         if (gdbCheck.out.isEmpty()) return false
 
-        Log.d(TAG, "Attempting GDB injection fallback")
         val gdbScript = """
             set timeout 5
             attach $pid
@@ -306,20 +315,35 @@ object SpeedInjector {
         return verifyInjection(pid)
     }
 
+    fun isProcessAlive(pid: Int): Boolean =
+        pid > 0 && Shell.cmd("test -d /proc/$pid").exec().isSuccess
+
     private fun verifyInjection(pid: Int): Boolean {
-        val result = Shell.cmd("grep -E 'libspeedhook|speedhook' /proc/$pid/maps 2>/dev/null").exec()
-        val injected = result.out.isNotEmpty()
-        Log.d(TAG, "Injection verified: $injected (${result.out.size} map lines)")
-        if (!injected) {
-            val maps = Shell.cmd("tail -5 /proc/$pid/maps 2>/dev/null").exec().out
-            Log.d(TAG, "Last maps lines: $maps")
+        if (!isProcessAlive(pid)) return false
+        val result = Shell.cmd(
+            "grep -F 'libspeedhook.so' /proc/$pid/maps 2>/dev/null | grep -E 'r-xp|r--p|rw-p'"
+        ).exec()
+        return result.out.isNotEmpty()
+    }
+
+    /** Call when returning to the app or on a timer while speed hack is "active". */
+    suspend fun validateActiveInjection(): Boolean = withContext(Dispatchers.IO) {
+        val state = SpeedControl.state.value
+        if (state.state != com.androce.core.SpeedHackState.ACTIVE) return@withContext true
+
+        val pid = state.targetPid
+        val ok = isProcessAlive(pid) && verifyInjection(pid)
+        if (!ok) {
+            reset()
+            SpeedControl.setFailed(
+                "Game restarted or hook unloaded — select the game again and tap Activate"
+            )
         }
-        return injected
+        ok
     }
 
     suspend fun updateSpeed(speed: Float) = withContext(Dispatchers.IO) {
         writeSpeedToShm(speed)
-        Log.d(TAG, "Speed updated to ${speed}x")
     }
 
     fun reset() {
