@@ -23,15 +23,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.Alignment
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.outlined.Article
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.outlined.Article
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -40,10 +46,14 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -58,6 +68,7 @@ import com.androce.ui.ProcessListScreen
 import com.androce.ui.ResultsScreen
 import com.androce.ui.SearchScreen
 import com.androce.ui.SettingsScreen
+import com.androce.ui.SpeedControlScreen
 import com.androce.ui.LoadingScreen
 import com.androce.ui.theme.AndroCETheme
 import com.androce.ui.theme.Background
@@ -69,16 +80,13 @@ import com.androce.ui.theme.Surface as SurfaceColor
 import com.androce.viewmodel.ProcessViewModel
 import com.androce.viewmodel.ScanViewModel
 
-enum class Screen { PROCESS_LIST, SEARCH, RESULTS }
-
 class MainActivity : ComponentActivity() {
 
     private val notifPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { /* granted or denied — freeze notification may not show on denial */ }
 
-    private val currentScreen = mutableStateOf(Screen.PROCESS_LIST)
-    private val bottomTab = mutableIntStateOf(0) // 0 = Scanner, 1 = Results, 2 = Settings
+    private val bottomTab = mutableIntStateOf(0) // 0 = Process, 1 = Scanner, 2 = Results, 3 = Speed, 4 = Settings
     private val isLoading = mutableStateOf(true)
     private val hasRoot = mutableStateOf(false)
     private val showRootError = mutableStateOf(false)
@@ -91,14 +99,13 @@ class MainActivity : ComponentActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                // Navigate back through tabs: Settings -> Speed -> Results -> Scanner -> Process -> Exit
                 when (bottomTab.intValue) {
-                    2 -> { bottomTab.intValue = 0; return }
+                    4 -> { bottomTab.intValue = 3; return }
+                    3 -> { bottomTab.intValue = 2; return }
+                    2 -> { bottomTab.intValue = 1; return }
                     1 -> { bottomTab.intValue = 0; return }
-                }
-                when (currentScreen.value) {
-                    Screen.RESULTS -> currentScreen.value = Screen.SEARCH
-                    Screen.SEARCH -> currentScreen.value = Screen.PROCESS_LIST
-                    Screen.PROCESS_LIST -> finish()
+                    0 -> finish()
                 }
             }
         })
@@ -109,8 +116,8 @@ class MainActivity : ComponentActivity() {
                 val processVm: ProcessViewModel = viewModel()
                 val scanVm: ScanViewModel = viewModel()
                 val context = LocalContext.current
-                var screen by remember { currentScreen }
                 var selectedTab by remember { bottomTab }
+                val snackbarHostState = remember { SnackbarHostState() }
                 var loading by remember { isLoading }
                 var hasRootAccess by remember { hasRoot }
 
@@ -122,10 +129,14 @@ class MainActivity : ComponentActivity() {
                         loading = false
                         return@LaunchedEffect
                     }
+                    // Initialize AppPrefs
+                    com.androce.core.AppPrefs.init(context)
                     // Initialize MemoryReader if not already done
                     if (!com.androce.core.MemoryReader.isNativeHelperReady) {
                         com.androce.core.MemoryReader.init(context)
                     }
+                    // Initialize speed injector
+                    scanVm.initSpeedInjector(context)
                     // Bind freeze service
                     scanVm.bindFreezeService(context)
                     // Minimum 500ms loading screen for smooth UX
@@ -174,6 +185,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                 Scaffold(
                     containerColor = Background,
+                    snackbarHost = { SnackbarHost(snackbarHostState) },
                     bottomBar = {
                         Column(
                             modifier = Modifier
@@ -184,28 +196,41 @@ class MainActivity : ComponentActivity() {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(48.dp),
+                                    .height(48.dp)
+                                    .horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.SpaceEvenly,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                            BottomNavTab(
-                                icon = if (selectedTab == 0) Icons.Filled.Memory else Icons.Outlined.Memory,
-                                label = "Scanner",
-                                selected = selectedTab == 0,
-                                onClick = { selectedTab = 0 }
-                            )
-                            BottomNavTab(
-                                icon = if (selectedTab == 1) Icons.Filled.Article else Icons.Outlined.Article,
-                                label = "Results",
-                                selected = selectedTab == 1,
-                                onClick = { selectedTab = 1 }
-                            )
-                            BottomNavTab(
-                                icon = if (selectedTab == 2) Icons.Filled.Settings else Icons.Outlined.Settings,
-                                label = "Settings",
-                                selected = selectedTab == 2,
-                                onClick = { selectedTab = 2 }
-                            )
+                                BottomNavTab(
+                                    icon = if (selectedTab == 0) Icons.Filled.Apps else Icons.Outlined.Apps,
+                                    label = "Process",
+                                    selected = selectedTab == 0,
+                                    onClick = { selectedTab = 0 }
+                                )
+                                BottomNavTab(
+                                    icon = if (selectedTab == 1) Icons.Filled.Memory else Icons.Outlined.Memory,
+                                    label = "Scanner",
+                                    selected = selectedTab == 1,
+                                    onClick = { selectedTab = 1 }
+                                )
+                                BottomNavTab(
+                                    icon = if (selectedTab == 2) Icons.AutoMirrored.Filled.Article else Icons.AutoMirrored.Outlined.Article,
+                                    label = "Results",
+                                    selected = selectedTab == 2,
+                                    onClick = { selectedTab = 2 }
+                                )
+                                BottomNavTab(
+                                    icon = if (selectedTab == 3) Icons.Filled.Speed else Icons.Outlined.Speed,
+                                    label = "Speed",
+                                    selected = selectedTab == 3,
+                                    onClick = { selectedTab = 3 }
+                                )
+                                BottomNavTab(
+                                    icon = if (selectedTab == 4) Icons.Filled.Settings else Icons.Outlined.Settings,
+                                    label = "Settings",
+                                    selected = selectedTab == 4,
+                                    onClick = { selectedTab = 4 }
+                                )
                             }
                         }
                     }
@@ -217,33 +242,35 @@ class MainActivity : ComponentActivity() {
                         color = Background
                     ) {
                         when (selectedTab) {
-                            0 -> when (screen) {
-                                Screen.PROCESS_LIST -> ProcessListScreen(
+                            0 -> {
+                                val selectedProcess by scanVm.selectedProcess.collectAsState()
+                                ProcessListScreen(
                                     viewModel = processVm,
+                                    selectedProcess = selectedProcess,
                                     onProcessSelected = { process ->
-                                        scanVm.selectedProcess = process
+                                        scanVm.setSelectedProcess(process)
                                         scanVm.resetScan()
                                         scanVm.loadRegions()
-                                        screen = Screen.SEARCH
                                     }
-                                )
-                                Screen.SEARCH -> SearchScreen(
-                                    viewModel = scanVm,
-                                    onBack = { screen = Screen.PROCESS_LIST },
-                                    onViewResults = {
-                                        selectedTab = 1
-                                    }
-                                )
-                                Screen.RESULTS -> ResultsScreen(
-                                    viewModel = scanVm,
-                                    onBack = null
                                 )
                             }
-                            1 -> ResultsScreen(
+                            1 -> SearchScreen(
+                                viewModel = scanVm,
+                                onBack = {},
+                                onViewResults = { selectedTab = 2 }
+                            )
+                            2 -> ResultsScreen(
                                 viewModel = scanVm,
                                 onBack = null
                             )
-                            2 -> SettingsScreen()
+                            3 -> {
+                                val selectedProcess by scanVm.selectedProcess.collectAsState()
+                                SpeedControlScreen(
+                                    viewModel = scanVm,
+                                    selectedProcess = selectedProcess
+                                )
+                            }
+                            4 -> SettingsScreen()
                         }
                     }
                 }
@@ -264,7 +291,7 @@ private fun BottomNavTab(
     Column(
         modifier = Modifier
             .clickable(onClick = onClick)
-            .padding(horizontal = 24.dp, vertical = 4.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(20.dp))

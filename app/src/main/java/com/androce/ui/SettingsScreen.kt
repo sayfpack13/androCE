@@ -40,6 +40,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
@@ -52,6 +54,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -71,6 +74,7 @@ import com.androce.ui.theme.AccentGreen
 import com.androce.ui.theme.Background
 import com.androce.ui.theme.Error
 import com.androce.ui.theme.OnBackground
+import com.androce.ui.theme.OnSurface
 import com.androce.ui.theme.Primary
 import com.androce.ui.theme.Surface
 import com.androce.ui.theme.SurfaceVariant
@@ -190,11 +194,13 @@ fun SettingsScreen() {
     var defaultFilter by remember { mutableStateOf(AppPrefs.defaultRegionFilter) }
     var scanEngine by remember { mutableStateOf(AppPrefs.scanEngine) }
     var freezeMs by remember { mutableLongStateOf(AppPrefs.freezeIntervalMs) }
+    var defaultSpeed by remember { mutableFloatStateOf(AppPrefs.defaultSpeedMultiplier) }
+    var autoEnableSpeed by remember { mutableStateOf(AppPrefs.autoEnableSpeedHack) }
     var showClearLogDialog by remember { mutableStateOf(false) }
 
     // --- Tab state ---
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabTitles = listOf("Status", "Scan", "General")
+    val tabTitles = listOf("Status", "Scan", "Speed", "General")
 
     Scaffold(
         topBar = {
@@ -258,7 +264,12 @@ fun SettingsScreen() {
                 onEngineChanged = { scanEngine = it; AppPrefs.scanEngine = it },
                 onFreezeChanged = { freezeMs = it; AppPrefs.freezeIntervalMs = it }
             )
-            2 -> GeneralTab(padding, context, showClearLogDialog, onShowClearLog = { showClearLogDialog = it })
+            2 -> SpeedTab(
+                padding, defaultSpeed, autoEnableSpeed,
+                onDefaultSpeedChanged = { defaultSpeed = it; AppPrefs.defaultSpeedMultiplier = it },
+                onAutoEnableChanged = { autoEnableSpeed = it; AppPrefs.autoEnableSpeedHack = it }
+            )
+            3 -> GeneralTab(padding, context, showClearLogDialog, onShowClearLog = { showClearLogDialog = it })
         }
     }
 
@@ -420,6 +431,134 @@ private fun ScanTab(
                 options = listOf(10L to "10 ms (aggressive)", 25L to "25 ms", 50L to "50 ms", 100L to "100 ms", 200L to "200 ms", 500L to "500 ms"),
                 selected = freezeMs,
                 onSelected = onFreezeChanged
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun SpeedTab(
+    padding: androidx.compose.foundation.layout.PaddingValues,
+    defaultSpeed: Float,
+    autoEnableSpeed: Boolean,
+    onDefaultSpeedChanged: (Float) -> Unit,
+    onAutoEnableChanged: (Boolean) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Spacer(Modifier.height(4.dp))
+
+        // Speed Hack settings
+        SectionLabel("Speed Hack")
+        SettingsCard {
+            Text("Default speed multiplier", color = OnBackground, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(8.dp))
+            
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("0.1x", fontSize = 12.sp, color = OnSurface)
+                Text(String.format("%.1fx", defaultSpeed), fontSize = 14.sp, color = Primary, fontWeight = FontWeight.Bold)
+                Text("10x", fontSize = 12.sp, color = OnSurface)
+            }
+            
+            Slider(
+                value = defaultSpeed,
+                onValueChange = onDefaultSpeedChanged,
+                valueRange = 0.1f..10f,
+                steps = 98,
+                colors = SliderDefaults.colors(
+                    thumbColor = Primary,
+                    activeTrackColor = Primary,
+                    inactiveTrackColor = SurfaceVariant
+                )
+            )
+            
+            Spacer(Modifier.height(12.dp))
+            
+            // Preset quick buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(0.5f, 1.0f, 2.0f, 5.0f).forEach { speed ->
+                    TextButton(
+                        onClick = { onDefaultSpeedChanged(speed) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                when {
+                                    speed == 1.0f -> Primary.copy(alpha = 0.2f)
+                                    speed < 1.0f -> Warning.copy(alpha = 0.2f)
+                                    else -> AccentGreen.copy(alpha = 0.2f)
+                                }
+                            ),
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = when {
+                                speed == 1.0f -> Primary
+                                speed < 1.0f -> Warning
+                                else -> AccentGreen
+                            }
+                        )
+                    ) {
+                        Text(String.format("%.1fx", speed), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            
+            Spacer(Modifier.height(16.dp))
+            
+            // Auto-enable option
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onAutoEnableChanged(!autoEnableSpeed) },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Auto-enable on process select", color = OnBackground, fontSize = 14.sp)
+                    Text(
+                        "Automatically activate speed hack when selecting a process",
+                        color = OnSurface,
+                        fontSize = 12.sp
+                    )
+                }
+                Icon(
+                    imageVector = if (autoEnableSpeed) Icons.Default.CheckCircle else Icons.Default.Error,
+                    contentDescription = null,
+                    tint = if (autoEnableSpeed) AccentGreen else OnSurface.copy(alpha = 0.3f),
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+
+        // Info card
+        SettingsCard {
+            SectionLabel("About Speed Hack")
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "The speed hack works by intercepting time-related system calls in the target process. This can speed up or slow down game timers, animations, and physics.",
+                color = OnSurface,
+                fontSize = 13.sp,
+                lineHeight = 18.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Note: Not all games are compatible. Some use alternative timing methods or have anti-cheat protection.",
+                color = Warning,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
             )
         }
 

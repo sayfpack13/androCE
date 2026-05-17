@@ -81,6 +81,7 @@ import com.androce.model.ValueType
 import com.androce.model.ValueTypeCategory
 import com.androce.ui.theme.Accent
 import com.androce.ui.theme.AccentGreen
+import com.androce.ui.theme.Background
 import com.androce.ui.theme.OnBackground
 import com.androce.ui.theme.OnSurface
 import com.androce.ui.theme.Primary
@@ -96,7 +97,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SearchScreen(
     viewModel: ScanViewModel,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)? = null,
     onViewResults: () -> Unit
 ) {
     val scanState by viewModel.scanState.collectAsState()
@@ -128,14 +129,9 @@ fun SearchScreen(
                     Column {
                         Text("Memory Search", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                         Text(
-                            viewModel.selectedProcess?.let { "${it.name}  [PID ${it.pid}]" } ?: "",
+                            viewModel.selectedProcess.value?.let { "${it.name}  [PID ${it.pid}]" } ?: "",
                             color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace
                         )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
                     }
                 },
                 actions = {
@@ -149,10 +145,10 @@ fun SearchScreen(
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)
             )
         },
-        containerColor = MaterialTheme.colorScheme.background
+        containerColor = Background
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             ScanTab(

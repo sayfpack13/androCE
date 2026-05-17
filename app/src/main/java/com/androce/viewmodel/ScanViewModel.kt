@@ -13,6 +13,8 @@ import com.androce.core.MemoryReader
 import com.androce.core.MemoryWriter
 import com.androce.core.ScanProgress
 import com.androce.core.Scanner
+import com.androce.core.SpeedControl
+import com.androce.core.SpeedInjector
 import com.androce.core.ValueEncoder
 import com.androce.model.CheatTable
 import com.androce.model.CheatTableEntry
@@ -46,22 +48,23 @@ data class CheatTableMeta(val processName: String, val savedAt: Long, val entryC
 
 class ScanViewModel : ViewModel() {
 
-    private var _selectedProcess: ProcessInfo? = null
-    var selectedProcess: ProcessInfo?
-        get() = _selectedProcess
-        set(value) {
-            val changed = _selectedProcess?.pid != value?.pid
-            _selectedProcess = value
-            if (changed) {
-                // Invalidate everything tied to the old PID
-                scanJob?.cancel()
-                _regions.value = emptyList()
-                regionsPid = null
-                _results.value = emptyList()
-                _scanState.value = ScanState.Idle
-                Scanner.paused = false
-            }
+    private val _selectedProcess = MutableStateFlow<ProcessInfo?>(null)
+    val selectedProcess: StateFlow<ProcessInfo?> = _selectedProcess
+    
+    fun setSelectedProcess(value: ProcessInfo?) {
+        val current = _selectedProcess.value
+        val changed = current?.pid != value?.pid
+        _selectedProcess.value = value
+        if (changed) {
+            // Invalidate everything tied to the old PID
+            scanJob?.cancel()
+            _regions.value = emptyList()
+            regionsPid = null
+            _results.value = emptyList()
+            _scanState.value = ScanState.Idle
+            Scanner.paused = false
         }
+    }
 
     var selectedValueType: ValueType = ValueType.BYTE4
     var searchInput: String = ""
@@ -116,7 +119,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun loadRegions() {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val regions = MemoryReader.getReadableRegions(pid)
@@ -136,7 +139,7 @@ class ScanViewModel : ViewModel() {
         }
     }
 
-    private fun isCurrentProcess(pid: Int): Boolean = _selectedProcess?.pid == pid
+    private fun isCurrentProcess(pid: Int): Boolean = _selectedProcess.value?.pid == pid
 
     /**
      * Returns cached readable regions for [pid], or loads them once in a thread-safe way.
@@ -176,7 +179,7 @@ class ScanViewModel : ViewModel() {
     // ---- Scans ----
 
     fun firstScan() {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
 
         if (selectedValueType == com.androce.model.ValueType.ALL) {
             // Scan across all numeric types
@@ -360,7 +363,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun unknownInitialScan() {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
 
         if (selectedValueType == com.androce.model.ValueType.ALL) {
             // Snapshot all numeric types
@@ -470,7 +473,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun refinedScan() {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
         val previous = _results.value
         if (previous.isEmpty()) {
             firstScan(); return
@@ -592,7 +595,7 @@ class ScanViewModel : ViewModel() {
      * EXACT and BETWEEN use the rangeMin/rangeMax or searchInput.
      */
     fun comparisonScan(op: ScanComparison) {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
         val previous = _results.value
         if (previous.isEmpty()) {
             _scanState.value = ScanState.Error("No previous results — run First Scan first"); return
@@ -695,7 +698,7 @@ class ScanViewModel : ViewModel() {
     private var isRefreshing = false
 
     fun refreshValues() {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
         if (isRefreshing) return
         if (_scanState.value is ScanState.Scanning) return
         isRefreshing = true
@@ -712,7 +715,7 @@ class ScanViewModel : ViewModel() {
     // ---- Writing ----
 
     fun writeBulk(addresses: List<Long>, newValue: String) {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
         val service = freezeService
         val bytes = ValueEncoder.encodeWriteValue(newValue, selectedValueType, xorKey) ?: return
         val addrSet = addresses.toSet()
@@ -743,7 +746,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun toggleFreeze(result: ScanResult) {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
         val service = freezeService ?: return
         if (result.frozen) service.removeFreeze(result.address)
         else service.addFreeze(pid, result.address, result.currentBytes)
@@ -753,7 +756,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun bulkFreezeSelected(freeze: Boolean) {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
         val service = freezeService ?: return
         val selected = _results.value.filter { it.selected }
         for (r in selected) {
@@ -767,7 +770,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun writeBulkAndFreeze(addresses: List<Long>, newValue: String) {
-        val pid = selectedProcess?.pid ?: return
+        val pid = selectedProcess.value?.pid ?: return
         val service = freezeService ?: return
         val bytes = ValueEncoder.encodeWriteValue(newValue, selectedValueType, xorKey) ?: return
         val addrSet = addresses.toSet()
@@ -867,7 +870,7 @@ class ScanViewModel : ViewModel() {
                 )
             }
             val table = CheatTable(
-                processName = selectedProcess?.name ?: "unknown",
+                processName = selectedProcess.value?.name ?: "unknown",
                 savedAt = System.currentTimeMillis(),
                 entries = entries
             )
@@ -883,7 +886,7 @@ class ScanViewModel : ViewModel() {
             val file = File(tablesDir(), "$name.json")
             if (!file.exists()) return 0
             val table = CheatTable.fromJson(file.readText())
-            val pid = selectedProcess?.pid
+            val pid = selectedProcess.value?.pid
             // Reconstruct ScanResults; if PID matches, refresh current values.
             val rebuilt = table.entries.map { e ->
                 val bytes = e.frozenValueHex?.let { hex ->
@@ -939,4 +942,38 @@ class ScanViewModel : ViewModel() {
             AppLogger.e("ScanViewModel", "renameCheatTable failed", e); false
         }
     }
+
+    // ---- Speed Hack ----
+
+    fun initSpeedInjector(context: Context) {
+        SpeedInjector.init(context)
+    }
+
+    fun activateSpeedHack() {
+        val pid = selectedProcess.value?.pid ?: return
+        val processName = selectedProcess.value?.name ?: return
+        
+        viewModelScope.launch {
+            val success = SpeedInjector.inject(pid, processName)
+            if (success) {
+                AppLogger.d("ScanViewModel", "Speed hack activated for $processName")
+            } else {
+                AppLogger.e("ScanViewModel", "Speed hack activation failed")
+            }
+        }
+    }
+
+    fun updateSpeedHack(speed: Float) {
+        SpeedControl.updateSpeed(speed)
+        viewModelScope.launch {
+            SpeedInjector.updateSpeed(speed)
+        }
+    }
+
+    fun deactivateSpeedHack() {
+        SpeedInjector.reset()
+        AppLogger.d("ScanViewModel", "Speed hack deactivated")
+    }
+
+    fun isSpeedHackActive(): Boolean = SpeedControl.isActive()
 }

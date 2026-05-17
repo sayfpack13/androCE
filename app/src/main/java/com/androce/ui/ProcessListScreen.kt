@@ -24,13 +24,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -76,10 +80,11 @@ import com.androce.viewmodel.ProcessViewModel
 import com.androce.viewmodel.SearchMode
 import kotlinx.coroutines.delay
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ProcessListScreen(
     viewModel: ProcessViewModel,
+    selectedProcess: ProcessInfo?,
     onProcessSelected: (ProcessInfo) -> Unit
 ) {
     val state by viewModel.state.collectAsState()
@@ -147,6 +152,11 @@ fun ProcessListScreen(
         containerColor = Background
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
+            
+            // Selected Process Card - Always visible when process selected
+            if (selectedProcess != null) {
+                SelectedProcessCard(selectedProcess)
+            }
 
             OutlinedTextField(
                 value = query,
@@ -245,15 +255,22 @@ fun ProcessListScreen(
                                             "${filtered.size} app${if (filtered.size != 1) "s" else ""}",
                                             color = OnSurface,
                                             fontSize = 11.sp,
-                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                            modifier = Modifier
+                                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                                .background(Background)
                                         )
                                     }
                                 }
-                                itemsIndexed(filtered, key = { _, p -> p.pid }) { index, process ->
-                                    AnimatedProcessRow(
+                                items(
+                                    items = filtered,
+                                    key = { it.pid }
+                                ) { process ->
+                                    val isSelected = selectedProcess?.pid == process.pid
+                                    ProcessRow(
                                         process = process,
-                                        index = index,
-                                        onClick = { onProcessSelected(process) }
+                                        isSelected = isSelected,
+                                        onClick = { onProcessSelected(process) },
+                                        modifier = Modifier.animateItemPlacement()
                                     )
                                 }
                             }
@@ -334,32 +351,32 @@ private fun rememberAppIconPainter(packageName: String): Painter? {
 }
 
 @Composable
-private fun AnimatedProcessRow(process: ProcessInfo, index: Int, onClick: () -> Unit) {
-    val visible = remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        delay(index * 18L)
-        visible.value = true
-    }
-    AnimatedVisibility(
-        visible = visible.value,
-        enter = fadeIn(tween(220)) + slideInVertically(tween(220), initialOffsetY = { it / 4 })
-    ) {
-        ProcessRow(process = process, onClick = onClick)
-    }
-}
-
-@Composable
-private fun ProcessRow(process: ProcessInfo, onClick: () -> Unit) {
+private fun ProcessRow(
+    process: ProcessInfo, 
+    isSelected: Boolean, 
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    // Cache expensive calculations
     val iconPainter = rememberAppIconPainter(process.packageName)
-    val displayName = process.appName ?: process.name
-    val subtitle = if (process.appName != null) process.name else process.packageName
+    val displayName = remember(process.appName, process.name) {
+        process.appName ?: process.name
+    }
+    val subtitle = remember(process.appName, process.name, process.packageName) {
+        if (process.appName != null) process.name else process.packageName
+    }
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .height(68.dp) // Fixed height for better recycling
             .clip(RoundedCornerShape(14.dp))
-            .background(SurfaceVariant)
-            .border(1.dp, SurfaceHigh.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+            .background(if (isSelected) Primary.copy(alpha = 0.15f) else SurfaceVariant)
+            .border(
+                width = if (isSelected) 2.dp else 1.dp,
+                color = if (isSelected) Primary else SurfaceHigh.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(14.dp)
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -396,34 +413,108 @@ private fun ProcessRow(process: ProcessInfo, onClick: () -> Unit) {
         Column(Modifier.weight(1f)) {
             Text(
                 text = displayName,
-                color = OnBackground,
-                fontWeight = FontWeight.SemiBold,
+                color = if (isSelected) Primary else OnBackground,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
                 fontSize = 15.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = subtitle,
-                color = OnSurface,
+                color = if (isSelected) Accent else OnSurface,
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
-        Spacer(Modifier.width(8.dp))
-        Box(
+        
+        // Selected indicator or PID badge
+        if (isSelected) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Primary)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = "Selected",
+                        tint = Color.White,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = "${process.pid}",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(SurfaceHigh)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = "${process.pid}",
+                    color = Accent,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectedProcessCard(process: ProcessInfo) {
+    val iconPainter = rememberAppIconPainter(process.packageName)
+    val displayName = process.appName ?: process.name
+    
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = Primary.copy(alpha = 0.1f)),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Primary)
+    ) {
+        Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(6.dp))
-                .background(SurfaceHigh)
-                .padding(horizontal = 8.dp, vertical = 4.dp)
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "${process.pid}",
-                color = Accent,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Medium
+            Icon(
+                Icons.Default.CheckCircle,
+                contentDescription = null,
+                tint = Primary,
+                modifier = Modifier.size(20.dp)
             )
+            Spacer(Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Selected Process",
+                    color = Primary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "$displayName (PID: ${process.pid})",
+                    color = OnBackground,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

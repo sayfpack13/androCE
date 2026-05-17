@@ -41,4 +41,16 @@ object AppPrefs {
     var freezeIntervalMs: Long
         get() = prefs.getLong("freeze_interval_ms", 100L)
         set(value) = prefs.edit().putLong("freeze_interval_ms", value).apply()
+
+    // --- Speed Hack Settings ---
+
+    /** Default speed multiplier. Default 1.0 (normal speed). */
+    var defaultSpeedMultiplier: Float
+        get() = prefs.getFloat("default_speed_multiplier", 1.0f)
+        set(value) = prefs.edit().putFloat("default_speed_multiplier", value).apply()
+
+    /** Auto-enable speed hack when selecting a process. Default false. */
+    var autoEnableSpeedHack: Boolean
+        get() = prefs.getBoolean("auto_enable_speed_hack", false)
+        set(value) = prefs.edit().putBoolean("auto_enable_speed_hack", value).apply()
 }

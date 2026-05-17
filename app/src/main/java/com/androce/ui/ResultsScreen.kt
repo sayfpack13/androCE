@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.FolderOpen
@@ -86,7 +88,11 @@ import androidx.compose.ui.unit.sp
 import com.androce.model.ScanResult
 import com.androce.ui.theme.Accent
 import com.androce.core.AppPrefs
+import com.androce.core.SpeedControl
+import com.androce.core.SpeedHackState
 import com.androce.ui.theme.AccentGreen
+import com.androce.ui.theme.Background
+import com.androce.ui.theme.Error
 import com.androce.ui.theme.Primary
 import com.androce.ui.theme.SurfaceHigh
 import com.androce.ui.theme.SurfaceVariant
@@ -152,6 +158,30 @@ fun ResultsScreen(
                     }
                 },
                 actions = {
+                    // Speed Hack button
+                    val speedState by SpeedControl.state.collectAsState()
+                    IconButton(
+                        onClick = { 
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (speedState.state == SpeedHackState.ACTIVE) {
+                                viewModel.deactivateSpeedHack()
+                            } else {
+                                viewModel.activateSpeedHack()
+                            }
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.Speed,
+                            contentDescription = "Speed Hack",
+                            tint = when (speedState.state) {
+                                SpeedHackState.ACTIVE -> AccentGreen
+                                SpeedHackState.INJECTING -> Warning
+                                SpeedHackState.FAILED -> Error
+                                else -> Primary
+                            }
+                        )
+                    }
+                    
                     IconButton(onClick = { viewModel.selectAll(!allSelected) }) {
                         Icon(
                             if (allSelected) Icons.Default.Clear else Icons.Default.SelectAll,
@@ -229,7 +259,7 @@ fun ResultsScreen(
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)
             )
         },
         floatingActionButton = {
@@ -270,11 +300,14 @@ fun ResultsScreen(
             }
         } else {
             LazyColumn(
-                Modifier.fillMaxSize().padding(padding),
+                modifier = Modifier.fillMaxSize().padding(padding),
                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
-                items(results, key = { it.address }) { result ->
+                items(
+                    items = results, 
+                    key = { it.address }
+                ) { result ->
                     ResultRow(
                         result = result,
                         onToggleSelect = { viewModel.toggleSelected(result.address) },
@@ -285,7 +318,8 @@ fun ResultsScreen(
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             scope.launch { snackBarHostState.showSnackbar("Address copied: ${result.addressHex}") }
                         },
-                        onDelete = { viewModel.removeResult(result.address) }
+                        onDelete = { viewModel.removeResult(result.address) },
+                        modifier = Modifier.animateItemPlacement()
                     )
                 }
             }
@@ -449,31 +483,37 @@ private fun ResultRow(
     onToggleFreeze: () -> Unit,
     onWrite: (String) -> Unit,
     onCopyAddress: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val haptic = LocalHapticFeedback.current
-    var isEditing by remember { mutableStateOf(false) }
-    var editValue by remember { mutableStateOf(result.displayValue()) }
+    var isEditing by remember(result.address) { mutableStateOf(false) }
+    var editValue by remember(result.address, result.currentBytes) { mutableStateOf(result.displayValue()) }
 
-    // Visual selection state: background changes when selected
-    val bgColor = if (result.selected) Primary.copy(alpha = 0.08f) else SurfaceVariant
-    val borderColor = when {
-        result.frozen -> Accent.copy(alpha = 0.6f)
-        result.selected -> Primary.copy(alpha = 0.4f)
-        else -> Color.Transparent
+    // Cache color calculations
+    val bgColor = remember(result.selected) {
+        if (result.selected) Primary.copy(alpha = 0.08f) else SurfaceVariant
     }
-
-    // Type label color
-    val typeColor = when (result.valueType.category) {
-        com.androce.model.ValueTypeCategory.INTEGER -> Primary
-        com.androce.model.ValueTypeCategory.FLOAT -> Accent
-        com.androce.model.ValueTypeCategory.TEXT -> AccentGreen
-        com.androce.model.ValueTypeCategory.SPECIAL -> Warning
+    val borderColor = remember(result.frozen, result.selected) {
+        when {
+            result.frozen -> Accent.copy(alpha = 0.6f)
+            result.selected -> Primary.copy(alpha = 0.4f)
+            else -> Color.Transparent
+        }
+    }
+    val typeColor = remember(result.valueType.category) {
+        when (result.valueType.category) {
+            com.androce.model.ValueTypeCategory.INTEGER -> Primary
+            com.androce.model.ValueTypeCategory.FLOAT -> Accent
+            com.androce.model.ValueTypeCategory.TEXT -> AccentGreen
+            com.androce.model.ValueTypeCategory.SPECIAL -> Warning
+        }
     }
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .heightIn(min = 72.dp) // Fixed minimum height for better recycling
             .clip(RoundedCornerShape(12.dp))
             .background(bgColor)
             .border(
