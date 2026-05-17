@@ -712,18 +712,20 @@ private fun searchHint(type: ValueType): String = when (type) {
     ValueType.BYTE2 -> "Short value"
     ValueType.BYTE4 -> "Int value"
     ValueType.BYTE8 -> "Long value"
-    ValueType.FLOAT -> "Float (e.g. 3.14)"
-    ValueType.DOUBLE -> "Double"
+    ValueType.FLOAT -> "Float (e.g. 3.14, or 11 for 11.xx)"
+    ValueType.DOUBLE -> "Double (e.g. 3.14, or 11 for 11.xx)"
     ValueType.STRING -> "Any text"
     ValueType.BYTE_ARRAY -> "Hex bytes e.g. FF 4A ?? 00"
     ValueType.XOR4 -> "Int (XOR with key)"
     ValueType.XOR8 -> "Long (XOR with key)"
-    ValueType.ALL -> "All numeric types"
+    ValueType.ALL_INTEGER -> "All integer types"
+    ValueType.ALL_FLOAT -> "All float types (fuzzy: 11 finds 11.xx)"
+    ValueType.ALL_NUMERIC, ValueType.ALL -> "All numeric types"
 }
 
 private fun keyboardTypeFor(type: ValueType): KeyboardType = when (type) {
     ValueType.STRING, ValueType.BYTE_ARRAY -> KeyboardType.Text
-    ValueType.FLOAT, ValueType.DOUBLE -> KeyboardType.Decimal
+    ValueType.FLOAT, ValueType.DOUBLE, ValueType.ALL_FLOAT -> KeyboardType.Decimal
     else -> KeyboardType.Number
 }
 
@@ -753,7 +755,9 @@ private fun isInputValid(input: String, type: ValueType): Boolean {
             ValueType.BYTE_ARRAY -> input.matches(Regex("^([0-9A-Fa-f]{2} )*[0-9A-Fa-f]{2}$"))
             ValueType.XOR4 -> input.toLongOrNull() != null
             ValueType.XOR8 -> input.toLongOrNull() != null
-            ValueType.ALL -> input.toLongOrNull() != null || input.toDoubleOrNull() != null
+            ValueType.ALL_INTEGER -> input.toLongOrNull() != null
+            ValueType.ALL_FLOAT -> input.toDoubleOrNull() != null
+            ValueType.ALL_NUMERIC, ValueType.ALL -> input.toLongOrNull() != null || input.toDoubleOrNull() != null
         }
     } catch (_: NumberFormatException) { false }
 }
@@ -769,5 +773,7 @@ private fun inputHelperText(type: ValueType): String = when (type) {
     ValueType.BYTE_ARRAY -> "Hex pairs separated by spaces (e.g., A1 B2 C3)"
     ValueType.XOR4 -> "Integer value"
     ValueType.XOR8 -> "Integer value"
-    ValueType.ALL -> "Enter a number"
+    ValueType.ALL_INTEGER -> "Enter an integer"
+    ValueType.ALL_FLOAT -> "Enter a decimal number"
+    ValueType.ALL_NUMERIC, ValueType.ALL -> "Enter a number"
 }

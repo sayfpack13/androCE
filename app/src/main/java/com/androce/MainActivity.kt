@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Memory
@@ -47,6 +49,9 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -55,6 +60,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.Button
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -66,6 +72,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -244,30 +251,32 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    // Check root access first
-                    val rootGranted = Shell.getShell().isRoot
-                    hasRootAccess = rootGranted
-                    if (!rootGranted) {
-                        loading = false
-                        return@LaunchedEffect
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        // Check root access first
+                        val rootGranted = Shell.getShell().isRoot
+                        hasRootAccess = rootGranted
+                        if (!rootGranted) {
+                            withContext(kotlinx.coroutines.Dispatchers.Main) { loading = false }
+                            return@withContext
+                        }
+                        // Initialize AppPrefs
+                        com.androce.core.AppPrefs.init(context)
+                        // Initialize MemoryReader if not already done
+                        if (!com.androce.core.MemoryReader.isNativeHelperReady) {
+                            com.androce.core.MemoryReader.init(context)
+                        }
+                        // Initialize speed injector
+                        scanVm.initSpeedInjector(context)
+                        // Bind freeze service
+                        scanVm.bindFreezeService(context)
+                        // Auto-start floating icon if enabled and root granted
+                        if (AppPrefs.floatingIconEnabled && canDrawOverlays()) {
+                            startService(Intent(context, com.androce.core.FloatingIconService::class.java))
+                        }
+                        // Minimum 500ms loading screen for smooth UX
+                        kotlinx.coroutines.delay(500)
+                        withContext(kotlinx.coroutines.Dispatchers.Main) { loading = false }
                     }
-                    // Initialize AppPrefs
-                    com.androce.core.AppPrefs.init(context)
-                    // Initialize MemoryReader if not already done
-                    if (!com.androce.core.MemoryReader.isNativeHelperReady) {
-                        com.androce.core.MemoryReader.init(context)
-                    }
-                    // Initialize speed injector
-                    scanVm.initSpeedInjector(context)
-                    // Bind freeze service
-                    scanVm.bindFreezeService(context)
-                    // Auto-start floating icon if enabled and root granted
-                    if (AppPrefs.floatingIconEnabled && canDrawOverlays()) {
-                        startService(Intent(context, com.androce.core.FloatingIconService::class.java))
-                    }
-                    // Minimum 500ms loading screen for smooth UX
-                    delay(500)
-                    loading = false
                 }
 
                 if (loading) {
@@ -317,26 +326,36 @@ class MainActivity : ComponentActivity() {
                         TopAppBar(
                             title = { },
                             navigationIcon = {
-                                TextButton(
+                                // Minimize button with background
+                                FilledTonalIconButton(
                                     onClick = { moveTaskToBack(true) },
-                                    modifier = Modifier.padding(horizontal = 16.dp)
+                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                        containerColor = SurfaceColor,
+                                        contentColor = Primary
+                                    )
                                 ) {
-                                    Text(
-                                        "Minimize",
-                                        color = Primary,
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Medium
+                                    Icon(
+                                        imageVector = Icons.Default.Apps,
+                                        contentDescription = "Minimize",
+                                        modifier = Modifier.size(22.dp)
                                     )
                                 }
                             },
                             actions = {
-                                IconButton(
-                                    onClick = { showExitDialog.value = true }
+                                // Exit button with red background
+                                FilledIconButton(
+                                    onClick = { showExitDialog.value = true },
+                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                    colors = IconButtonDefaults.filledIconButtonColors(
+                                        containerColor = Error,
+                                        contentColor = Color.White
+                                    )
                                 ) {
                                     Icon(
-                                        Icons.Default.Close,
+                                        Icons.Default.PowerSettingsNew,
                                         contentDescription = "Exit",
-                                        tint = Error
+                                        modifier = Modifier.size(22.dp)
                                     )
                                 }
                             },
@@ -357,7 +376,7 @@ class MainActivity : ComponentActivity() {
                                     .fillMaxWidth()
                                     .height(48.dp)
                                     .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 BottomNavTab(
@@ -486,7 +505,9 @@ private fun BottomNavTab(
                 color = Primary,
                 fontSize = 8.sp,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 2.dp)
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp).widthIn(max = 80.dp)
             )
         }
     }

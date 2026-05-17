@@ -25,6 +25,7 @@ import com.androce.model.ChangeDirection
 import com.androce.model.ProcessInfo
 import com.androce.model.RegionFilter
 import com.androce.model.ScanComparison
+import com.androce.model.matchesFilter
 import com.androce.model.ScanResult
 import com.androce.model.ValueType
 import kotlinx.coroutines.Dispatchers
@@ -186,6 +187,21 @@ class ScanViewModel : ViewModel() {
     private fun isCurrentProcess(pid: Int): Boolean = _selectedProcess.value?.pid == pid
 
     /**
+     * Expand aggregate value types (ALL_*) to their component types.
+     */
+    private fun getExpandedTypes(type: ValueType): List<ValueType> {
+        return when (type) {
+            ValueType.ALL_INTEGER -> listOf(ValueType.BYTE1, ValueType.BYTE2, ValueType.BYTE4, ValueType.BYTE8)
+            ValueType.ALL_FLOAT -> listOf(ValueType.FLOAT, ValueType.DOUBLE)
+            ValueType.ALL_NUMERIC, ValueType.ALL -> listOf(
+                ValueType.BYTE1, ValueType.BYTE2, ValueType.BYTE4, ValueType.BYTE8,
+                ValueType.FLOAT, ValueType.DOUBLE
+            )
+            else -> listOf(type)
+        }
+    }
+
+    /**
      * Returns cached readable regions for [pid], or loads them once in a thread-safe way.
      * Cache is PID-aware and protected with a mutex to prevent duplicate concurrent loads.
      */
@@ -225,8 +241,9 @@ class ScanViewModel : ViewModel() {
     fun firstScan() {
         val pid = selectedProcess.value?.pid ?: return
 
-        if (selectedValueType == com.androce.model.ValueType.ALL) {
-            // Scan across all numeric types
+        val expandedTypes = getExpandedTypes(selectedValueType)
+        if (expandedTypes.size > 1) {
+            // Scan across multiple types
             scanJob?.cancel()
             scanJob = viewModelScope.launch(Dispatchers.IO) {
                 try {
@@ -237,11 +254,10 @@ class ScanViewModel : ViewModel() {
                     }
                     val regions = getOrLoadRegions(pid)
 
-                    val numericTypes = listOf(
-                        com.androce.model.ValueType.BYTE1, com.androce.model.ValueType.BYTE2,
-                        com.androce.model.ValueType.BYTE4, com.androce.model.ValueType.BYTE8,
-                        com.androce.model.ValueType.FLOAT, com.androce.model.ValueType.DOUBLE
-                    )
+                    val numericTypes = expandedTypes
+                    val totalTypes = numericTypes.size
+                    val totalRegionsAllTypes = regions.filter { it.matchesFilter(_regionFilter.value) }.size * totalTypes
+                    var cumulativeScannedRegions = 0
 
                     val allResults = mutableListOf<com.androce.model.ScanResult>()
                     for ((idx, type) in numericTypes.withIndex()) {
@@ -260,35 +276,124 @@ class ScanViewModel : ViewModel() {
                             continue
                         }
 
-                        AppLogger.d(
-                            "ScanViewModel",
-                            "firstScan ALL: scanning type=$type pattern=${
-                                pattern.joinToString(" ") {
-                                    "%02x".format(it)
-                                }
-                            }"
-                        )
+                        // Check for fuzzy float/double search (empty pattern = fuzzy marker)
+                        val isFuzzyFloat = type == ValueType.FLOAT &&
+                            pattern.isEmpty() &&
+                            com.androce.core.ValueEncoder.getFloatRangeIfWholeNumber(searchInput) != null
+                        val isFuzzyDouble = type == ValueType.DOUBLE &&
+                            pattern.isEmpty() &&
+                            com.androce.core.ValueEncoder.getDoubleRangeIfWholeNumber(searchInput) != null
 
-                        val results = Scanner.firstScan(
-                            pid = pid,
-                            valueType = type,
-                            pattern = pattern,
-                            wildcard = wildcard,
-                            regions = regions,
-                            regionFilter = _regionFilter.value,
-                            onProgress = { progress ->
-                                if (isActive) {
-                                    viewModelScope.launch(Dispatchers.Main) {
-                                        _scanState.value =
-                                            ScanState.Scanning(progress.copy(foundCount = allResults.size + progress.foundCount))
-                                        val progressPercent = if (progress.totalRegions > 0) {
-                                            (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
-                                        } else 0
-                                        AppPrefs.scanProgress = progressPercent
+                        val results = if (isFuzzyFloat) {
+                            // Fuzzy float search: snapshot + filter
+                            val floatRange = com.androce.core.ValueEncoder.getFloatRangeIfWholeNumber(searchInput)!!
+                            AppLogger.d("ScanViewModel", "firstScan ${selectedValueType.name}: FLOAT fuzzy ${floatRange.min} to ${floatRange.max}")
+                            val snapshot = Scanner.unknownInitialScan(
+                                pid = pid,
+                                valueType = ValueType.FLOAT,
+                                regions = regions,
+                                regionFilter = _regionFilter.value,
+                                onProgress = { progress ->
+                                    if (isActive) {
+                                        // Calculate overall progress across all types
+                                        val overallScanned = cumulativeScannedRegions + progress.scannedRegions
+                                        viewModelScope.launch(Dispatchers.Main) {
+                                            _scanState.value = ScanState.Scanning(
+                                                ScanProgress(
+                                                    scannedRegions = overallScanned,
+                                                    totalRegions = totalRegionsAllTypes,
+                                                    foundCount = allResults.size + progress.foundCount
+                                                )
+                                            )
+                                            val progressPercent = if (totalRegionsAllTypes > 0) {
+                                                (overallScanned * 100 / totalRegionsAllTypes).coerceIn(0, 100)
+                                            } else 0
+                                            AppPrefs.scanProgress = progressPercent
+                                        }
                                     }
                                 }
+                            )
+                            cumulativeScannedRegions += regions.filter { it.matchesFilter(_regionFilter.value) }.size
+                            snapshot.filter { result ->
+                                val value = java.lang.Float.intBitsToFloat(
+                                    java.nio.ByteBuffer.wrap(result.currentBytes)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+                                )
+                                value >= floatRange.min && value < floatRange.max
                             }
-                        )
+                        } else if (isFuzzyDouble) {
+                            // Fuzzy double search: snapshot + filter
+                            val doubleRange = com.androce.core.ValueEncoder.getDoubleRangeIfWholeNumber(searchInput)!!
+                            AppLogger.d("ScanViewModel", "firstScan ${selectedValueType.name}: DOUBLE fuzzy ${doubleRange.min} to ${doubleRange.max}")
+                            val snapshot = Scanner.unknownInitialScan(
+                                pid = pid,
+                                valueType = ValueType.DOUBLE,
+                                regions = regions,
+                                regionFilter = _regionFilter.value,
+                                onProgress = { progress ->
+                                    if (isActive) {
+                                        // Calculate overall progress across all types
+                                        val overallScanned = cumulativeScannedRegions + progress.scannedRegions
+                                        viewModelScope.launch(Dispatchers.Main) {
+                                            _scanState.value = ScanState.Scanning(
+                                                ScanProgress(
+                                                    scannedRegions = overallScanned,
+                                                    totalRegions = totalRegionsAllTypes,
+                                                    foundCount = allResults.size + progress.foundCount
+                                                )
+                                            )
+                                            val progressPercent = if (totalRegionsAllTypes > 0) {
+                                                (overallScanned * 100 / totalRegionsAllTypes).coerceIn(0, 100)
+                                            } else 0
+                                            AppPrefs.scanProgress = progressPercent
+                                        }
+                                    }
+                                }
+                            )
+                            cumulativeScannedRegions += regions.filter { it.matchesFilter(_regionFilter.value) }.size
+                            snapshot.filter { result ->
+                                val value = java.lang.Double.longBitsToDouble(
+                                    java.nio.ByteBuffer.wrap(result.currentBytes)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN).long
+                                )
+                                value >= doubleRange.min && value < doubleRange.max
+                            }
+                        } else {
+                            // Normal pattern-based search
+                            AppLogger.d(
+                                "ScanViewModel",
+                                "firstScan ${selectedValueType.name}: scanning type=$type pattern=${
+                                    pattern.joinToString(" ") { "%02x".format(it) }
+                                }"
+                            )
+                            Scanner.firstScan(
+                                pid = pid,
+                                valueType = type,
+                                pattern = pattern,
+                                wildcard = wildcard,
+                                regions = regions,
+                                regionFilter = _regionFilter.value,
+                                onProgress = { progress ->
+                                    if (isActive) {
+                                        // Calculate overall progress across all types
+                                        val overallScanned = cumulativeScannedRegions + progress.scannedRegions
+                                        viewModelScope.launch(Dispatchers.Main) {
+                                            _scanState.value = ScanState.Scanning(
+                                                ScanProgress(
+                                                    scannedRegions = overallScanned,
+                                                    totalRegions = totalRegionsAllTypes,
+                                                    foundCount = allResults.size + progress.foundCount
+                                                )
+                                            )
+                                            val progressPercent = if (totalRegionsAllTypes > 0) {
+                                                (overallScanned * 100 / totalRegionsAllTypes).coerceIn(0, 100)
+                                            } else 0
+                                            AppPrefs.scanProgress = progressPercent
+                                        }
+                                    }
+                                }
+                            ).also { cumulativeScannedRegions += regions.filter { it.matchesFilter(_regionFilter.value) }.size }
+                        }
                         allResults.addAll(results)
                     }
 
@@ -299,7 +404,7 @@ class ScanViewModel : ViewModel() {
                         }
                         AppLogger.d(
                             "ScanViewModel",
-                            "firstScan ALL done: total found=${allResults.size}"
+                            "firstScan ${selectedValueType.name} done: total found=${allResults.size}"
                         )
                     }
                 } catch (e: Exception) {
@@ -311,6 +416,7 @@ class ScanViewModel : ViewModel() {
                 }
             }
         } else {
+            // Single type scan
             scanJob?.cancel()
             scanJob = viewModelScope.launch(Dispatchers.IO) {
                 try {
@@ -373,6 +479,143 @@ class ScanViewModel : ViewModel() {
                             .distinctBy { it.address }
                         AppLogger.d("ScanViewModel", "firstScan STRING: utf8=${utf8Results.size} utf16=${utf16Results.size} unique=${combined.size}")
                         combined
+                    } else if (selectedValueType == ValueType.FLOAT && searchInput.isNotBlank()) {
+                        // Encode first to determine if this is fuzzy or exact search
+                        val (pattern, wildcard) = try {
+                            ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                _scanState.value = ScanState.Error(e.message ?: "Invalid value")
+                            }
+                            return@launch
+                        }
+                        // Check for fuzzy float search (whole number input like "11" -> search 11.0 to 12.0)
+                        // Empty pattern is marker for fuzzy search
+                        val floatRange = ValueEncoder.getFloatRangeIfWholeNumber(searchInput)
+                        if (floatRange != null && pattern.isEmpty()) {
+                            // Fuzzy search: snapshot all floats then filter by range
+                            AppLogger.d("ScanViewModel", "firstScan FLOAT fuzzy: ${floatRange.min} to ${floatRange.max}")
+                            val snapshot = Scanner.unknownInitialScan(
+                                pid = pid,
+                                valueType = ValueType.FLOAT,
+                                regions = regions,
+                                regionFilter = _regionFilter.value,
+                                onProgress = { progress ->
+                                    if (isActive) {
+                                        viewModelScope.launch(Dispatchers.Main) {
+                                            _scanState.value = ScanState.Scanning(progress)
+                                            val progressPercent = if (progress.totalRegions > 0) {
+                                                (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
+                                            } else 0
+                                            AppPrefs.scanProgress = progressPercent
+                                        }
+                                    }
+                                }
+                            )
+                            // Filter results to only include values in range [min, max)
+                            snapshot.filter { result ->
+                                val value = java.lang.Float.intBitsToFloat(
+                                    java.nio.ByteBuffer.wrap(result.currentBytes)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+                                )
+                                value >= floatRange.min && value < floatRange.max
+                            }
+                        } else {
+                            // Exact float search
+                            AppLogger.d(
+                                "ScanViewModel",
+                                "firstScan: input='$searchInput' type=$selectedValueType pattern=${
+                                    pattern.joinToString(" ") { "%02x".format(it) }
+                                }"
+                            )
+                            Scanner.firstScan(
+                                pid = pid,
+                                valueType = selectedValueType,
+                                pattern = pattern,
+                                wildcard = wildcard,
+                                regions = regions,
+                                regionFilter = _regionFilter.value,
+                                onProgress = { progress ->
+                                    if (isActive) {
+                                        viewModelScope.launch(Dispatchers.Main) {
+                                            _scanState.value = ScanState.Scanning(progress)
+                                            val progressPercent = if (progress.totalRegions > 0) {
+                                                (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
+                                            } else 0
+                                            AppPrefs.scanProgress = progressPercent
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    } else if (selectedValueType == ValueType.DOUBLE && searchInput.isNotBlank()) {
+                        // Encode first to determine if this is fuzzy or exact search
+                        val (pattern, wildcard) = try {
+                            ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
+                        } catch (e: Exception) {
+                            withContext(Dispatchers.Main) {
+                                _scanState.value = ScanState.Error(e.message ?: "Invalid value")
+                            }
+                            return@launch
+                        }
+                        // Check for fuzzy double search (whole number input like "11" -> search 11.0 to 12.0)
+                        val doubleRange = ValueEncoder.getDoubleRangeIfWholeNumber(searchInput)
+                        if (doubleRange != null && pattern.isEmpty()) {
+                            // Fuzzy search: snapshot all doubles then filter by range
+                            AppLogger.d("ScanViewModel", "firstScan DOUBLE fuzzy: ${doubleRange.min} to ${doubleRange.max}")
+                            val snapshot = Scanner.unknownInitialScan(
+                                pid = pid,
+                                valueType = ValueType.DOUBLE,
+                                regions = regions,
+                                regionFilter = _regionFilter.value,
+                                onProgress = { progress ->
+                                    if (isActive) {
+                                        viewModelScope.launch(Dispatchers.Main) {
+                                            _scanState.value = ScanState.Scanning(progress)
+                                            val progressPercent = if (progress.totalRegions > 0) {
+                                                (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
+                                            } else 0
+                                            AppPrefs.scanProgress = progressPercent
+                                        }
+                                    }
+                                }
+                            )
+                            // Filter results to only include values in range [min, max)
+                            snapshot.filter { result ->
+                                val value = java.lang.Double.longBitsToDouble(
+                                    java.nio.ByteBuffer.wrap(result.currentBytes)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN).long
+                                )
+                                value >= doubleRange.min && value < doubleRange.max
+                            }
+                        } else {
+                            // Exact double search
+                            AppLogger.d(
+                                "ScanViewModel",
+                                "firstScan: input='$searchInput' type=$selectedValueType pattern=${
+                                    pattern.joinToString(" ") { "%02x".format(it) }
+                                }"
+                            )
+                            Scanner.firstScan(
+                                pid = pid,
+                                valueType = selectedValueType,
+                                pattern = pattern,
+                                wildcard = wildcard,
+                                regions = regions,
+                                regionFilter = _regionFilter.value,
+                                onProgress = { progress ->
+                                    if (isActive) {
+                                        viewModelScope.launch(Dispatchers.Main) {
+                                            _scanState.value = ScanState.Scanning(progress)
+                                            val progressPercent = if (progress.totalRegions > 0) {
+                                                (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
+                                            } else 0
+                                            AppPrefs.scanProgress = progressPercent
+                                        }
+                                    }
+                                }
+                            )
+                        }
                     } else {
                         val (pattern, wildcard) = try {
                             ValueEncoder.encodeSearchValue(searchInput, selectedValueType, xorKey)
@@ -433,19 +676,16 @@ class ScanViewModel : ViewModel() {
     fun unknownInitialScan() {
         val pid = selectedProcess.value?.pid ?: return
 
-        if (selectedValueType == com.androce.model.ValueType.ALL) {
-            // Snapshot all numeric types
+        val expandedTypes = getExpandedTypes(selectedValueType)
+        if (expandedTypes.size > 1) {
+            // Snapshot all expanded types
             scanJob?.cancel()
             Scanner.paused = false
             _isPaused.value = false
             scanJob = viewModelScope.launch(Dispatchers.IO) {
                 try {
                     val regions = getOrLoadRegions(pid)
-                    val numericTypes = listOf(
-                        com.androce.model.ValueType.BYTE1, com.androce.model.ValueType.BYTE2,
-                        com.androce.model.ValueType.BYTE4, com.androce.model.ValueType.BYTE8,
-                        com.androce.model.ValueType.FLOAT, com.androce.model.ValueType.DOUBLE
-                    )
+                    val numericTypes = expandedTypes
 
                     val allResults = mutableListOf<com.androce.model.ScanResult>()
                     for (type in numericTypes) {
@@ -470,7 +710,7 @@ class ScanViewModel : ViewModel() {
                     if (isActive) {
                         AppLogger.d(
                             "ScanViewModel",
-                            "unknownInitialScan ALL: found=${allResults.size}"
+                            "unknownInitialScan ${selectedValueType.name}: found=${allResults.size}"
                         )
                         withContext(Dispatchers.Main) {
                             _results.value = allResults
@@ -547,7 +787,8 @@ class ScanViewModel : ViewModel() {
             firstScan(); return
         }
 
-        if (selectedValueType == ValueType.ALL) {
+        val expandedTypes = getExpandedTypes(selectedValueType)
+        if (expandedTypes.size > 1) {
             scanJob?.cancel()
             scanJob = viewModelScope.launch(Dispatchers.IO) {
                 try {
@@ -555,6 +796,7 @@ class ScanViewModel : ViewModel() {
                         _scanState.value = ScanState.Scanning(ScanProgress(0, previous.size, 0))
                     }
                     val allResults = mutableListOf<ScanResult>()
+                    // Group by actual type from previous results
                     val byType = previous.groupBy { it.valueType }
                     var processed = 0
                     for ((type, items) in byType) {
@@ -690,7 +932,8 @@ class ScanViewModel : ViewModel() {
         }
         AppLogger.d("ScanViewModel", "comparisonScan: op=${op.name} type=$selectedValueType count=${previous.size} op1=$operand1 op2=$operand2")
 
-        if (selectedValueType == ValueType.ALL) {
+        val expandedTypes = getExpandedTypes(selectedValueType)
+        if (expandedTypes.size > 1) {
             scanJob?.cancel()
             scanJob = viewModelScope.launch(Dispatchers.IO) {
                 try {

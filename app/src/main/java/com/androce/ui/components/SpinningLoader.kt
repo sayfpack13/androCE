@@ -35,8 +35,8 @@ fun SpinningLoader(
     var rotation by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(Unit) {
         while (isActive) {
-            rotation = (rotation + 10f) % 360f
-            delay(16L)
+            rotation = (rotation + 12f) % 360f
+            delay(32L) // 30fps to reduce CPU usage during startup
         }
     }
 

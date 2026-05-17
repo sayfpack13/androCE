@@ -9,6 +9,12 @@ object ValueEncoder {
     private val WILDCARD_BYTE: Byte = 0xCC.toByte()
 
     /**
+     * For fuzzy float search - holds the range when searching for whole numbers.
+     * e.g., input "11" -> range 11.0f to 12.0f (finds 11.0, 11.5, 11.99, etc.)
+     */
+    data class FloatRange(val min: Float, val max: Float)
+
+    /**
      * Encode a user-entered string into a byte pattern for scanning.
      * Returns Pair(pattern, wildcard byte) — wildcard is non-null only for BYTE_ARRAY.
      */
@@ -35,12 +41,36 @@ object ValueEncoder {
                 Pair(longToBytes(v), null)
             }
             ValueType.FLOAT -> {
-                val v = input.trim().toFloat()
-                Pair(intToBytes(java.lang.Float.floatToIntBits(v)), null)
+                val trimmed = input.trim()
+                val v = trimmed.toFloat()
+                // Check if input is a whole number (no decimal point and no scientific notation)
+                // If so, we'll use range search: e.g., "11" -> search 11.0 to 12.0
+                val isWholeNumber = !trimmed.contains(".") && 
+                                    !trimmed.contains("e") && 
+                                    !trimmed.contains("E") &&
+                                    v == v.toInt().toFloat()
+                if (isWholeNumber) {
+                    // Return empty pattern as marker - ScanViewModel will handle range search
+                    Pair(ByteArray(0), null)
+                } else {
+                    Pair(intToBytes(java.lang.Float.floatToIntBits(v)), null)
+                }
             }
             ValueType.DOUBLE -> {
-                val v = input.trim().toDouble()
-                Pair(longToBytes(java.lang.Double.doubleToLongBits(v)), null)
+                val trimmed = input.trim()
+                val v = trimmed.toDouble()
+                // Check if input is a whole number (no decimal point and no scientific notation)
+                // If so, we'll use range search: e.g., "11" -> search 11.0 to 12.0
+                val isWholeNumber = !trimmed.contains(".") && 
+                                    !trimmed.contains("e") && 
+                                    !trimmed.contains("E") &&
+                                    v == v.toInt().toDouble()
+                if (isWholeNumber) {
+                    // Return empty pattern as marker - ScanViewModel will handle range search
+                    Pair(ByteArray(0), null)
+                } else {
+                    Pair(longToBytes(java.lang.Double.doubleToLongBits(v)), null)
+                }
             }
             ValueType.STRING -> Pair(input.toByteArray(Charsets.UTF_8), null)
             ValueType.BYTE_ARRAY -> {
@@ -59,7 +89,10 @@ object ValueEncoder {
                 val v = input.trim().toLong() xor xorKey
                 Pair(longToBytes(v), null)
             }
-            ValueType.ALL -> Pair(ByteArray(0), null)
+            ValueType.ALL,
+            ValueType.ALL_INTEGER,
+            ValueType.ALL_FLOAT,
+            ValueType.ALL_NUMERIC -> Pair(ByteArray(0), null)
         }
     }
 
@@ -84,11 +117,52 @@ object ValueEncoder {
                 }
                 ValueType.XOR4 -> intToBytes(input.trim().toInt() xor xorKey.toInt())
                 ValueType.XOR8 -> longToBytes(input.trim().toLong() xor xorKey)
-                ValueType.ALL -> ByteArray(0)
+                ValueType.ALL,
+                ValueType.ALL_INTEGER,
+                ValueType.ALL_FLOAT,
+                ValueType.ALL_NUMERIC -> ByteArray(0)
             }
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Check if float input should use fuzzy/range search.
+     * Returns FloatRange if input is a whole number (e.g., "11" -> 11.0f to 12.0f),
+     * null if input has decimals (e.g., "11.5") - use exact search.
+     */
+    fun getFloatRangeIfWholeNumber(input: String): FloatRange? {
+        val trimmed = input.trim()
+        // Must not contain decimal point or scientific notation
+        if (trimmed.contains(".") || trimmed.contains("e") || trimmed.contains("E")) {
+            return null
+        }
+        val v = trimmed.toFloatOrNull() ?: return null
+        // Check if it's a whole number
+        if (v != v.toInt().toFloat()) return null
+        val intVal = v.toInt()
+        return FloatRange(intVal.toFloat(), (intVal + 1).toFloat())
+    }
+
+    data class DoubleRange(val min: Double, val max: Double)
+
+    /**
+     * Check if double input should use fuzzy/range search.
+     * Returns DoubleRange if input is a whole number (e.g., "11" -> 11.0 to 12.0),
+     * null if input has decimals (e.g., "11.5") - use exact search.
+     */
+    fun getDoubleRangeIfWholeNumber(input: String): DoubleRange? {
+        val trimmed = input.trim()
+        // Must not contain decimal point or scientific notation
+        if (trimmed.contains(".") || trimmed.contains("e") || trimmed.contains("E")) {
+            return null
+        }
+        val v = trimmed.toDoubleOrNull() ?: return null
+        // Check if it's a whole number
+        if (v != v.toInt().toDouble()) return null
+        val intVal = v.toInt()
+        return DoubleRange(intVal.toDouble(), (intVal + 1).toDouble())
     }
 
     fun intToBytes(v: Int): ByteArray = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()

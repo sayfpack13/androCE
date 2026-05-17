@@ -18,7 +18,10 @@ enum class ValueType(val label: String, val byteSize: Int, val category: ValueTy
     BYTE_ARRAY("Byte Array", -1, ValueTypeCategory.SPECIAL, "Hex bytes with ?? wildcards"),
     XOR4("XOR Int",  4,  ValueTypeCategory.SPECIAL, "Int XOR with key"),
     XOR8("XOR Long", 8,  ValueTypeCategory.SPECIAL, "Long XOR with key"),
-    ALL("All Types", -1, ValueTypeCategory.INTEGER, "Search all numeric types");
+    ALL_INTEGER("All Integer", -1, ValueTypeCategory.INTEGER, "Search all integer types (1-8 bytes)"),
+    ALL_FLOAT("All Float", -1, ValueTypeCategory.FLOAT, "Search all float types (Float+Double)"),
+    ALL_NUMERIC("All Numeric", -1, ValueTypeCategory.SPECIAL, "Search all numeric types"),
+    ALL("All Types", -1, ValueTypeCategory.SPECIAL, "Search all numeric types");
 
     val isVariableLength get() = byteSize == -1
 }

@@ -38,7 +38,9 @@ data class ScanResult(
         ValueType.BYTE_ARRAY -> currentBytes.joinToString(" ") { "%02X".format(it) }
         ValueType.XOR4 -> bytesToInt(currentBytes).toString()
         ValueType.XOR8 -> bytesToLong(currentBytes).toString()
-        ValueType.ALL -> "ALL"
+        ValueType.ALL_INTEGER -> "INT"
+        ValueType.ALL_FLOAT -> "FLT"
+        ValueType.ALL_NUMERIC, ValueType.ALL -> "ALL"
     }
 
     fun clearChange(): ScanResult = copy(
