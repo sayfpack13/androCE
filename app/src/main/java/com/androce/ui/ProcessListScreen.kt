@@ -6,7 +6,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -50,11 +53,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.graphics.drawable.toBitmap
 import com.androce.model.ProcessInfo
 import com.androce.ui.theme.Accent
 import com.androce.ui.theme.Background
@@ -65,6 +73,7 @@ import com.androce.ui.theme.SurfaceHigh
 import com.androce.ui.theme.SurfaceVariant
 import com.androce.viewmodel.ProcessListState
 import com.androce.viewmodel.ProcessViewModel
+import com.androce.viewmodel.SearchMode
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,12 +85,14 @@ fun ProcessListScreen(
     val state by viewModel.state.collectAsState()
     val filtered by viewModel.filteredProcesses.collectAsState()
     val query by viewModel.searchQuery.collectAsState()
+    val searchMode by viewModel.searchMode.collectAsState()
     val isLoading = state is ProcessListState.Loading
+    val context = LocalContext.current
 
     // Load processes only if not already loaded
     val currentState = state
     if (currentState is ProcessListState.Idle || (currentState is ProcessListState.Success && currentState.processes.isEmpty())) {
-        LaunchedEffect(Unit) { viewModel.loadProcesses() }
+        LaunchedEffect(Unit) { viewModel.loadProcesses(context.packageManager) }
     }
 
     Scaffold(
@@ -126,7 +137,7 @@ fun ProcessListScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Surface),
                 actions = {
                     if (!isLoading) {
-                        IconButton(onClick = { viewModel.loadProcesses() }) {
+                        IconButton(onClick = { viewModel.loadProcesses(context.packageManager) }) {
                             Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary)
                         }
                     }
@@ -173,12 +184,44 @@ fun ProcessListScreen(
                 singleLine = true
             )
 
+            // Search mode chips
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+            ) {
+                val modes = listOf(
+                    SearchMode.ALL     to "All",
+                    SearchMode.TITLE   to "App Title",
+                    SearchMode.PACKAGE to "Package"
+                )
+                items(modes.size) { i ->
+                    val (mode, label) = modes[i]
+                    val selected = searchMode == mode
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(if (selected) Primary else SurfaceVariant)
+                            .border(1.dp, if (selected) Primary else SurfaceHigh, RoundedCornerShape(20.dp))
+                            .clickable { viewModel.searchMode.value = mode }
+                            .padding(horizontal = 14.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            label,
+                            color = if (selected) Color.White else OnSurface,
+                            fontSize = 12.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
             when (state) {
                 is ProcessListState.Error -> ErrorView((state as ProcessListState.Error).message)
                 else -> {
                     PullToRefreshBox(
                         isRefreshing = isLoading,
-                        onRefresh = { viewModel.loadProcesses() },
+                        onRefresh = { viewModel.loadProcesses(context.packageManager) },
                         modifier = Modifier.fillMaxSize()
                     ) {
                         if (isLoading && filtered.isEmpty()) {
@@ -278,47 +321,89 @@ private fun ErrorView(message: String) {
 }
 
 @Composable
+private fun rememberAppIconPainter(packageName: String): Painter? {
+    val context = LocalContext.current
+    return remember(packageName) {
+        try {
+            val drawable = context.packageManager.getApplicationIcon(packageName)
+            BitmapPainter(drawable.toBitmap().asImageBitmap())
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+@Composable
 private fun AnimatedProcessRow(process: ProcessInfo, index: Int, onClick: () -> Unit) {
-    ProcessRow(process = process, onClick = onClick)
+    val visible = remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        delay(index * 18L)
+        visible.value = true
+    }
+    AnimatedVisibility(
+        visible = visible.value,
+        enter = fadeIn(tween(220)) + slideInVertically(tween(220), initialOffsetY = { it / 4 })
+    ) {
+        ProcessRow(process = process, onClick = onClick)
+    }
 }
 
 @Composable
 private fun ProcessRow(process: ProcessInfo, onClick: () -> Unit) {
+    val iconPainter = rememberAppIconPainter(process.packageName)
+    val displayName = process.appName ?: process.name
+    val subtitle = if (process.appName != null) process.name else process.packageName
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(SurfaceVariant)
+            .border(1.dp, SurfaceHigh.copy(alpha = 0.5f), RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Brush.linearGradient(listOf(PrimaryDim.copy(alpha = 0.4f), Accent.copy(alpha = 0.15f)))),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = process.name.take(1).uppercase(),
-                color = Primary,
-                fontWeight = FontWeight.Bold,
-                fontSize = 17.sp
+        if (iconPainter != null) {
+            Image(
+                painter = iconPainter,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(10.dp))
             )
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(PrimaryDim.copy(alpha = 0.4f), Accent.copy(alpha = 0.15f))
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = process.name.take(1).uppercase(),
+                    color = Primary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 17.sp
+                )
+            }
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                text = process.name,
+                text = displayName,
                 color = OnBackground,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp,
+                fontSize = 15.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = process.packageName,
+                text = subtitle,
                 color = OnSurface,
                 fontSize = 11.sp,
                 maxLines = 1,

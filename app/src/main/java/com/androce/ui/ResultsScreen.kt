@@ -100,7 +100,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun ResultsScreen(
     viewModel: ScanViewModel,
-    onBack: () -> Unit
+    onBack: (() -> Unit)? = null
 ) {
     val results by viewModel.results.collectAsState()
     val scanState by viewModel.scanState.collectAsState()
@@ -145,8 +145,10 @@ fun ResultsScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
+                        }
                     }
                 },
                 actions = {

@@ -1,5 +1,6 @@
 package com.androce.core
 
+import android.content.pm.PackageManager
 import com.androce.model.ProcessInfo
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
@@ -7,7 +8,7 @@ import kotlinx.coroutines.withContext
 
 object ProcessLister {
 
-    suspend fun listProcesses(): List<ProcessInfo> = withContext(Dispatchers.IO) {
+    suspend fun listProcesses(pm: PackageManager?): List<ProcessInfo> = withContext(Dispatchers.IO) {
         val results = mutableListOf<ProcessInfo>()
         try {
             // Fast path: single ps command — returns all processes in one syscall
@@ -24,7 +25,10 @@ object ProcessLister {
                     val pid = parts[0].trim().toIntOrNull() ?: continue
                     val name = parts[1].trim()
                     if (name.isBlank()) continue
-                    results.add(ProcessInfo(pid = pid, name = name.substringAfterLast('/'), packageName = name))
+                    // ps NAME is truncated to 15 chars — read full cmdline from /proc when needed
+                    val fullName = fullCmdline(pid) ?: name
+                    val (cleanPkg, appName) = resolveAppInfo(pm, fullName)
+                    results.add(ProcessInfo(pid = pid, name = cleanPkg.substringAfterLast('/'), packageName = cleanPkg, appName = appName))
                 }
             } else {
                 // Fallback: per-PID loop for stripped ROMs that lack ps
@@ -47,7 +51,8 @@ object ProcessLister {
                     val pid = parts[0].toIntOrNull() ?: continue
                     val name = parts[1].trim().trimEnd('\u0000')
                     if (name.isBlank()) continue
-                    results.add(ProcessInfo(pid = pid, name = name.substringAfterLast('/'), packageName = name))
+                    val (cleanPkg, appName) = resolveAppInfo(pm, name)
+                    results.add(ProcessInfo(pid = pid, name = name.substringAfterLast('/'), packageName = cleanPkg, appName = appName))
                 }
             }
 
@@ -55,6 +60,29 @@ object ProcessLister {
         } catch (e: Exception) {
             AppLogger.e("ProcessLister", "listProcesses failed", e)
         }
-        results.sortedBy { it.name }
+        results.sortedBy { it.appName?.lowercase() ?: it.name.lowercase() }
+    }
+
+    private fun fullCmdline(pid: Int): String? {
+        return try {
+            val bytes = java.io.File("/proc/$pid/cmdline").readBytes()
+            val end = bytes.indexOfFirst { it == 0.toByte() }.takeIf { it >= 0 } ?: bytes.size
+            val full = String(bytes, 0, end).trim()
+            if (full.isBlank()) null else full
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun resolveAppInfo(pm: PackageManager?, rawName: String): Pair<String, String?> {
+        val cleanPackage = rawName.substringBefore(':').substringAfterLast('/')
+        if (pm == null) return Pair(cleanPackage, null)
+        val label = try {
+            val info = pm.getApplicationInfo(cleanPackage, 0)
+            pm.getApplicationLabel(info)?.toString()
+        } catch (_: Exception) {
+            null
+        }
+        return Pair(cleanPackage, label)
     }
 }

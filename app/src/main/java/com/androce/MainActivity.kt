@@ -231,18 +231,17 @@ class MainActivity : ComponentActivity() {
                                     viewModel = scanVm,
                                     onBack = { screen = Screen.PROCESS_LIST },
                                     onViewResults = {
-                                        screen = Screen.RESULTS
                                         selectedTab = 1
                                     }
                                 )
                                 Screen.RESULTS -> ResultsScreen(
                                     viewModel = scanVm,
-                                    onBack = { screen = Screen.SEARCH }
+                                    onBack = null
                                 )
                             }
                             1 -> ResultsScreen(
                                 viewModel = scanVm,
-                                onBack = { selectedTab = 0 }
+                                onBack = null
                             )
                             2 -> SettingsScreen()
                         }
