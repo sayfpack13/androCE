@@ -51,7 +51,7 @@ echo.
 
 REM -------- [4/4] Logcat --------
 echo [4/4] Logcat ^(Ctrl+C to stop^)...
-echo       Tags: SpeedInjector only ^(errors + inject OK/FAIL^)
+echo       PID-filtered: all com.androce logs including errors ^(androCE.*, SpeedInjector, crashes^)
 echo       For speed hack: pick game process, open Speed tab, tap Activate.
 call :stream_logs
 exit /b 0
@@ -114,7 +114,7 @@ for /f "skip=1 tokens=1,2" %%a in ('adb devices 2^>nul') do (
 exit /b 0
 
 REM ============================================================
-REM  Filtered logcat to console + logs\logcat_*.txt
+REM  PID-filtered logcat to console + logs\logcat_*.txt
 REM ============================================================
 :stream_logs
 set "LOGDIR=%~dp0logs"
@@ -124,6 +124,18 @@ set "LOGFILE=%LOGDIR%\logcat_%TS%.txt"
 echo Saving to: %LOGFILE%
 echo.
 
-REM Tag filter only — avoid matching com.androce in system/OEM spam.
-powershell -NoProfile -Command "adb logcat -v time SpeedInjector:I SpeedHook:E *:S 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
+set "APP_PID="
+for /L %%i in (1,1,15) do (
+    for /f "delims=" %%p in ('adb shell pidof -s com.androce 2^>nul') do set "APP_PID=%%p"
+    if defined APP_PID goto :stream_logs_pid
+    ping 127.0.0.1 -n 2 >nul
+)
+
+echo WARNING: com.androce PID not found — falling back to error tag filter.
+powershell -NoProfile -Command "adb logcat -v time SpeedInjector:I SpeedInjector:E SpeedHook:E GlobalExceptionHandler:E AndroidRuntime:E androCE.MemoryReader:E androCE.Scanner:E androCE.MemoryWriter:E androCE.ScanViewModel:E androCE.ProcessLister:E *:S 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
+exit /b 0
+
+:stream_logs_pid
+echo App PID: !APP_PID!
+powershell -NoProfile -Command "adb logcat -v time --pid=!APP_PID! 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
 exit /b 0

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.provider.Settings
 import android.widget.Toast
 import com.topjohnwu.superuser.Shell
@@ -68,11 +69,13 @@ import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import com.androce.ui.ProcessListScreen
@@ -143,6 +146,25 @@ class MainActivity : ComponentActivity() {
         stopService(Intent(this, com.androce.core.FloatingIconService::class.java))
     }
 
+    /** Tear down services and kill the process so nothing keeps running in the background. */
+    private fun forceExit() {
+        try {
+            val floatIntent = Intent(this, com.androce.core.FloatingIconService::class.java).apply {
+                action = com.androce.core.FloatingIconService.ACTION_STOP
+            }
+            startService(floatIntent)
+            stopService(Intent(this, com.androce.core.FloatingIconService::class.java))
+            stopService(Intent(this, com.androce.core.FreezeService::class.java))
+            val scanVm = ViewModelProvider(this)[ScanViewModel::class.java]
+            scanVm.cancelScan()
+            scanVm.unbindFreezeService(this)
+        } catch (_: Exception) { }
+
+        finishAndRemoveTask()
+        Process.killProcess(Process.myPid())
+        System.exit(0)
+    }
+
     private fun hideFloatingIcon() {
         val intent = Intent(this, com.androce.core.FloatingIconService::class.java).apply {
             action = com.androce.core.FloatingIconService.ACTION_HIDE
@@ -176,6 +198,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Setup global exception handler
+        com.androce.core.GlobalExceptionHandler.setup(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -193,7 +217,7 @@ class MainActivity : ComponentActivity() {
                     3 -> { bottomTab.intValue = 2; return }
                     2 -> { bottomTab.intValue = 1; return }
                     1 -> { bottomTab.intValue = 0; return }
-                    0 -> finish()
+                    0 -> forceExit()
                 }
             }
         })
@@ -277,7 +301,7 @@ class MainActivity : ComponentActivity() {
                                 textAlign = TextAlign.Center
                             )
                             Button(
-                                onClick = { finish() },
+                                onClick = { forceExit() },
                                 colors = ButtonDefaults.buttonColors(containerColor = Primary)
                             ) {
                                 Text("Exit", color = Color.White)
@@ -291,31 +315,28 @@ class MainActivity : ComponentActivity() {
                     topBar = {
                         @OptIn(ExperimentalMaterial3Api::class)
                         TopAppBar(
-                            modifier = Modifier.height(64.dp),
                             title = { },
                             navigationIcon = {
                                 TextButton(
                                     onClick = { moveTaskToBack(true) },
-                                    modifier = Modifier.padding(horizontal = 12.dp)
+                                    modifier = Modifier.padding(horizontal = 16.dp)
                                 ) {
                                     Text(
                                         "Minimize",
                                         color = Primary,
-                                        fontSize = 15.sp,
+                                        fontSize = 16.sp,
                                         fontWeight = FontWeight.Medium
                                     )
                                 }
                             },
                             actions = {
                                 IconButton(
-                                    onClick = { showExitDialog.value = true },
-                                    modifier = Modifier.size(56.dp)
+                                    onClick = { showExitDialog.value = true }
                                 ) {
                                     Icon(
                                         Icons.Default.Close,
                                         contentDescription = "Exit",
-                                        tint = Error,
-                                        modifier = Modifier.size(28.dp)
+                                        tint = Error
                                     )
                                 }
                             },
@@ -378,7 +399,11 @@ class MainActivity : ComponentActivity() {
                     Surface(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(innerPadding),
+                            .padding(
+                                start = innerPadding.calculateLeftPadding(LocalLayoutDirection.current),
+                                end = innerPadding.calculateRightPadding(LocalLayoutDirection.current),
+                                bottom = innerPadding.calculateBottomPadding()
+                            ),
                         color = Background
                     ) {
                         when (selectedTab) {
@@ -420,12 +445,7 @@ class MainActivity : ComponentActivity() {
                     title = { Text("Exit androCE?", color = OnBackground) },
                     text = { Text("Are you sure you want to exit the app?", color = OnBackground.copy(alpha = 0.7f)) },
                     confirmButton = {
-                        TextButton(onClick = {
-                            val intent = Intent(this, com.androce.core.FloatingIconService::class.java)
-                            intent.action = com.androce.core.FloatingIconService.ACTION_STOP
-                            startService(intent)
-                            finish()
-                        }) {
+                        TextButton(onClick = { forceExit() }) {
                             Text("Exit", color = Error)
                         }
                     },

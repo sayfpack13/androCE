@@ -159,6 +159,7 @@ class ScanViewModel : ViewModel() {
             context.unbindService(freezeServiceConnection)
             freezeServiceBound = false
         }
+        context.stopService(Intent(context, FreezeService::class.java))
     }
 
     fun loadRegions() {
