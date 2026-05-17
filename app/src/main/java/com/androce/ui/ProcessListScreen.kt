@@ -35,7 +35,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import com.androce.ui.components.SpinningLoader
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -269,8 +269,7 @@ fun ProcessListScreen(
                                     ProcessRow(
                                         process = process,
                                         isSelected = isSelected,
-                                        onClick = { onProcessSelected(process) },
-                                        modifier = Modifier.animateItemPlacement()
+                                        onClick = { onProcessSelected(process) }
                                     )
                                 }
                             }
@@ -290,14 +289,14 @@ private fun LoadingView() {
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             Box(contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(
+                SpinningLoader(
+                    size = 64.dp,
                     color = Primary,
-                    modifier = Modifier.size(64.dp),
                     strokeWidth = 3.dp
                 )
-                CircularProgressIndicator(
-                    color = Accent.copy(alpha = 0.4f),
-                    modifier = Modifier.size(48.dp),
+                SpinningLoader(
+                    size = 48.dp,
+                    color = Accent.copy(alpha = 0.5f),
                     strokeWidth = 2.dp
                 )
                 Icon(

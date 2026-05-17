@@ -36,11 +36,43 @@ android {
         compose = true
     }
 
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(layout.buildDirectory.dir("generated/injectorAssets"))
+        }
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
         }
     }
+}
+
+/* APK lib/ only ships .so — package speedinjector under assets/injectors/<abi>/ */
+val copySpeedInjector by tasks.registering(Copy::class) {
+    dependsOn(tasks.named("externalNativeBuildDebug"))
+    doFirst {
+        delete(layout.buildDirectory.dir("generated/injectorAssets/injectors"))
+    }
+    from(layout.buildDirectory.dir("intermediates/cxx/Debug")) {
+        include("*/obj/*/speedinjector")
+        eachFile {
+            val abi = relativePath.segments[relativePath.segments.size - 2]
+            relativePath = org.gradle.api.file.RelativePath(true, abi, "speedinjector")
+        }
+    }
+    into(layout.buildDirectory.dir("generated/injectorAssets/injectors"))
+    duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.INCLUDE
+    doLast {
+        logger.lifecycle("androCE: staged speedinjector in APK assets")
+    }
+}
+
+afterEvaluate {
+    tasks.matching {
+        it.name.startsWith("merge") && it.name.endsWith("Assets")
+    }.configureEach { dependsOn(copySpeedInjector) }
 }
 
 dependencies {

@@ -118,8 +118,16 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 var selectedTab by remember { bottomTab }
                 val snackbarHostState = remember { SnackbarHostState() }
+                val processChangeNotice by scanVm.processChangeNotice.collectAsState()
                 var loading by remember { isLoading }
                 var hasRootAccess by remember { hasRoot }
+
+                LaunchedEffect(processChangeNotice) {
+                    processChangeNotice?.let { notice ->
+                        snackbarHostState.showSnackbar(notice.message)
+                        scanVm.clearProcessChangeNotice()
+                    }
+                }
 
                 LaunchedEffect(Unit) {
                     // Check root access first
@@ -249,8 +257,6 @@ class MainActivity : ComponentActivity() {
                                     selectedProcess = selectedProcess,
                                     onProcessSelected = { process ->
                                         scanVm.setSelectedProcess(process)
-                                        scanVm.resetScan()
-                                        scanVm.loadRegions()
                                     }
                                 )
                             }
@@ -287,7 +293,7 @@ private fun BottomNavTab(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val tint = if (selected) Primary else OnBackground.copy(alpha = 0.5f)
+    val tint = if (selected) Primary else OnSurface.copy(alpha = 0.55f)
     Column(
         modifier = Modifier
             .clickable(onClick = onClick)

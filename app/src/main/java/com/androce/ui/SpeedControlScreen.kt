@@ -1,7 +1,8 @@
 package com.androce.ui
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
+import com.androce.ui.components.rememberAnimatedFloat
+import com.androce.ui.components.rememberSystemAnimationsEnabled
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,7 +30,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import com.androce.ui.components.SpinningLoader
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -60,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.core.SpeedControl
 import com.androce.core.SpeedHackState
+import com.androce.ui.components.AttachedProcessBanner
 import com.androce.model.ProcessInfo
 import com.androce.ui.theme.Accent
 import com.androce.ui.theme.AccentGreen
@@ -82,7 +84,7 @@ fun SpeedControlScreen(
 ) {
     val haptic = LocalHapticFeedback.current
     val speedState by SpeedControl.state.collectAsState()
-    
+
     var sliderValue by remember { mutableFloatStateOf(speedState.speedMultiplier) }
     
     // Sync slider value when speed state changes externally (presets, reset, etc.)
@@ -99,7 +101,7 @@ fun SpeedControlScreen(
                     Column {
                         Text("Speed Hack", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                         Text(
-                            selectedProcess?.let { "${it.name}  [PID ${it.pid}]" } ?: "No process selected",
+                            selectedProcess?.let { "${it.displayName()}  [PID ${it.pid}]" } ?: "No process selected",
                             color = Accent, fontSize = 12.sp
                         )
                     }
@@ -119,11 +121,12 @@ fun SpeedControlScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
             
-            // No Process Warning
             if (selectedProcess == null) {
                 NoProcessWarningCard()
+            } else {
+                AttachedProcessBanner(selectedProcess!!)
             }
-            
+
             // Status Card
             StatusCard(speedState.state, speedState.errorMessage)
             
@@ -209,8 +212,8 @@ private fun StatusCard(state: SpeedHackState, errorMessage: String?) {
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (state == SpeedHackState.INJECTING) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(24.dp),
+                SpinningLoader(
+                    size = 24.dp,
                     color = color,
                     strokeWidth = 2.dp
                 )
@@ -235,22 +238,20 @@ private fun StatusCard(state: SpeedHackState, errorMessage: String?) {
 
 @Composable
 private fun SpeedDisplayCard(speed: Float, isActive: Boolean) {
-    val animatedSpeed by animateFloatAsState(
-        targetValue = speed,
-        label = "speed"
-    )
-    
-    val bgColor by animateColorAsState(
-        targetValue = if (isActive && speed != 1.0f) {
-            if (speed > 1.0f) AccentGreen.copy(alpha = 0.15f)
-            else Warning.copy(alpha = 0.15f)
-        } else Surface,
-        label = "bgColor"
-    )
+    val animatedSpeed = rememberAnimatedFloat(speed, label = "speed")
+    val animationsEnabled = rememberSystemAnimationsEnabled()
+    val targetBg = if (isActive && speed != 1.0f) {
+        if (speed > 1.0f) AccentGreen.copy(alpha = 0.15f)
+        else Warning.copy(alpha = 0.15f)
+    } else {
+        Surface
+    }
+    val bgColor by animateColorAsState(targetBg, label = "bgColor")
+    val cardBg = if (animationsEnabled) bgColor else targetBg
     
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = bgColor),
+        colors = CardDefaults.cardColors(containerColor = cardBg),
         shape = RoundedCornerShape(16.dp)
     ) {
         Column(
@@ -474,8 +475,9 @@ private fun ControlButtons(
                     enabled = false,
                     shape = RoundedCornerShape(10.dp)
                 ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
+                    SpinningLoader(
+                        size = 18.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
                         strokeWidth = 2.dp
                     )
                     Spacer(modifier = Modifier.width(8.dp))

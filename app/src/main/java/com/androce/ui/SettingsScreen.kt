@@ -94,6 +94,19 @@ data class RequirementStatus(
 
 enum class RequirementLevel { OK, WARN, FAIL }
 
+private data class RequirementSnapshot(
+    val label: String,
+    val detail: String,
+    val level: RequirementLevel,
+    val fixLabel: String? = null,
+    val fixCommand: String? = null
+)
+
+private object RequirementsCache {
+    var snapshots: List<RequirementSnapshot> = emptyList()
+    var checking: Boolean = false
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen() {
@@ -101,89 +114,109 @@ fun SettingsScreen() {
     val scope = rememberCoroutineScope()
 
     // --- Requirements state ---
-    var requirements by remember { mutableStateOf<List<RequirementStatus>>(emptyList()) }
-    var checking by remember { mutableStateOf(false) }
+    fun buildStatusList(snapshots: List<RequirementSnapshot>, onRecheck: () -> Unit): List<RequirementStatus> = snapshots.map { snap ->
+        val fixAction = if (snap.fixLabel != null && snap.fixCommand != null) {
+            {
+                scope.launch(Dispatchers.IO) {
+                    Shell.cmd(snap.fixCommand).exec()
+                    withContext(Dispatchers.Main) { onRecheck() }
+                }
+                Unit
+            }
+        } else {
+            null
+        }
+        RequirementStatus(
+            label = snap.label,
+            detail = snap.detail,
+            level = snap.level,
+            fixLabel = snap.fixLabel,
+            fixAction = fixAction
+        )
+    }
+
+    var requirements by remember { mutableStateOf(buildStatusList(RequirementsCache.snapshots) {}) }
+    var checking by remember { mutableStateOf(RequirementsCache.checking) }
 
     fun runChecks() {
+        if (RequirementsCache.checking) return
         checking = true
+        RequirementsCache.checking = true
         scope.launch(Dispatchers.IO) {
-            val results = mutableListOf<RequirementStatus>()
+            try {
+                val snapshots = mutableListOf<RequirementSnapshot>()
 
-            val root = Shell.isAppGrantedRoot()
-            results.add(
-                if (root == true) RequirementStatus("Root access", "Root granted", RequirementLevel.OK)
-                else RequirementStatus("Root access", "Root not available — app cannot function", RequirementLevel.FAIL)
-            )
+                val root = Shell.isAppGrantedRoot()
+                snapshots.add(
+                    if (root == true) RequirementSnapshot("Root access", "Root granted", RequirementLevel.OK)
+                    else RequirementSnapshot("Root access", "Root not available — app cannot function", RequirementLevel.FAIL)
+                )
 
-            val swapResult = Shell.cmd("cat /proc/swaps 2>/dev/null").exec()
-            val hasSwap = swapResult.out.any { line ->
-                val trimmed = line.trim()
-                trimmed.isNotEmpty() && !trimmed.startsWith("Filename")
-            }
-            results.add(
-                if (!hasSwap) RequirementStatus("Memory swap", "No swap detected", RequirementLevel.OK)
-                else RequirementStatus(
-                    "Memory swap",
-                    "Swap/zRAM active — may cause stale reads",
-                    RequirementLevel.WARN,
-                    fixLabel = "Disable",
-                    fixAction = {
-                        scope.launch(Dispatchers.IO) {
-                            Shell.cmd("swapoff -a").exec()
-                            withContext(Dispatchers.Main) { runChecks() }
-                        }
+                val swapResult = Shell.cmd("cat /proc/swaps 2>/dev/null").exec()
+                val hasSwap = swapResult.out.any { line ->
+                    val trimmed = line.trim()
+                    trimmed.isNotEmpty() && !trimmed.startsWith("Filename")
+                }
+                snapshots.add(
+                    if (!hasSwap) RequirementSnapshot("Memory swap", "No swap detected", RequirementLevel.OK)
+                    else RequirementSnapshot(
+                        "Memory swap",
+                        "Swap/zRAM active — may cause stale reads",
+                        RequirementLevel.WARN,
+                        fixLabel = "Disable",
+                        fixCommand = "swapoff -a"
+                    )
+                )
+
+                val seResult = Shell.cmd("getenforce 2>/dev/null").exec()
+                val seStatus = seResult.out.firstOrNull()?.trim() ?: "Unknown"
+                snapshots.add(
+                    when {
+                        seStatus.equals("Permissive", ignoreCase = true) ->
+                            RequirementSnapshot("SELinux", "Permissive", RequirementLevel.OK)
+                        seStatus.equals("Disabled", ignoreCase = true) ->
+                            RequirementSnapshot("SELinux", "Disabled", RequirementLevel.OK)
+                        seStatus.equals("Enforcing", ignoreCase = true) ->
+                            RequirementSnapshot(
+                                "SELinux",
+                                "Enforcing — some memory reads may fail",
+                                RequirementLevel.WARN,
+                                fixLabel = "Set Permissive",
+                                fixCommand = "setenforce 0"
+                            )
+                        else ->
+                            RequirementSnapshot("SELinux", seStatus, RequirementLevel.WARN)
                     }
                 )
-            )
 
-            val seResult = Shell.cmd("getenforce 2>/dev/null").exec()
-            val seStatus = seResult.out.firstOrNull()?.trim() ?: "Unknown"
-            results.add(
-                when {
-                    seStatus.equals("Permissive", ignoreCase = true) ->
-                        RequirementStatus("SELinux", "Permissive", RequirementLevel.OK)
-                    seStatus.equals("Disabled", ignoreCase = true) ->
-                        RequirementStatus("SELinux", "Disabled", RequirementLevel.OK)
-                    seStatus.equals("Enforcing", ignoreCase = true) ->
-                        RequirementStatus(
-                            "SELinux",
-                            "Enforcing — some memory reads may fail",
-                            RequirementLevel.WARN,
-                            fixLabel = "Set Permissive",
-                            fixAction = {
-                                scope.launch(Dispatchers.IO) {
-                                    Shell.cmd("setenforce 0").exec()
-                                    withContext(Dispatchers.Main) { runChecks() }
-                                }
-                            }
-                        )
-                    else ->
-                        RequirementStatus("SELinux", seStatus, RequirementLevel.WARN)
+                snapshots.add(
+                    if (MemoryReader.isNativeHelperReady)
+                        RequirementSnapshot("Native helper", "Ready", RequirementLevel.OK)
+                    else
+                        RequirementSnapshot("Native helper", "Not available — scanning will not work", RequirementLevel.FAIL)
+                )
+
+                snapshots.add(
+                    if (MemoryReader.isPythonAvailable)
+                        RequirementSnapshot("Python", "Available", RequirementLevel.OK)
+                    else
+                        RequirementSnapshot("Python", "Not found — using native only", RequirementLevel.WARN)
+                )
+
+                withContext(Dispatchers.Main) {
+                    RequirementsCache.snapshots = snapshots
+                    requirements = buildStatusList(snapshots, ::runChecks)
                 }
-            )
-
-            results.add(
-                if (MemoryReader.isNativeHelperReady)
-                    RequirementStatus("Native helper", "Ready", RequirementLevel.OK)
-                else
-                    RequirementStatus("Native helper", "Not available — scanning will not work", RequirementLevel.FAIL)
-            )
-
-            results.add(
-                if (MemoryReader.isPythonAvailable)
-                    RequirementStatus("Python", "Available", RequirementLevel.OK)
-                else
-                    RequirementStatus("Python", "Not found — using native only", RequirementLevel.WARN)
-            )
-
-            withContext(Dispatchers.Main) {
-                requirements = results
-                checking = false
+            } finally {
+                withContext(Dispatchers.Main) {
+                    RequirementsCache.checking = false
+                    checking = false
+                }
             }
         }
     }
 
-    if (requirements.isEmpty() && !checking) {
+    if (RequirementsCache.snapshots.isEmpty() && !checking) {
         runChecks()
     }
 

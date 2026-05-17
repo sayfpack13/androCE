@@ -38,7 +38,6 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.FolderOpen
@@ -82,14 +81,14 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.model.ScanResult
+import com.androce.ui.components.NoProcessSelectedBanner
 import com.androce.ui.theme.Accent
 import com.androce.core.AppPrefs
-import com.androce.core.SpeedControl
-import com.androce.core.SpeedHackState
 import com.androce.ui.theme.AccentGreen
 import com.androce.ui.theme.Background
 import com.androce.ui.theme.Error
@@ -110,6 +109,7 @@ fun ResultsScreen(
 ) {
     val results by viewModel.results.collectAsState()
     val scanState by viewModel.scanState.collectAsState()
+    val selectedProcess by viewModel.selectedProcess.collectAsState()
     val selectedCount by remember { derivedStateOf { results.count { it.selected } } }
     val allSelected by remember { derivedStateOf { results.isNotEmpty() && results.all { it.selected } } }
     val selectedAddresses by remember { derivedStateOf { results.filter { it.selected }.map { it.address } } }
@@ -130,13 +130,25 @@ fun ResultsScreen(
     // Auto-refresh timer: always enabled when results exist and no scan is running
     val isScanning = scanState is ScanState.Scanning
     val refreshInterval = AppPrefs.autoRefreshIntervalMs
-    LaunchedEffect(results.isEmpty(), isScanning, refreshInterval) {
-        if (results.isEmpty() || isScanning || refreshInterval <= 0L) return@LaunchedEffect
+    LaunchedEffect(selectedProcess?.pid, results.isEmpty(), isScanning, refreshInterval) {
+        if (selectedProcess == null || results.isEmpty() || isScanning || refreshInterval <= 0L) {
+            return@LaunchedEffect
+        }
+        val pid = selectedProcess!!.pid
         while (true) {
             delay(refreshInterval)
-            if (results.isEmpty() || scanState is ScanState.Scanning) break
+            if (viewModel.selectedProcess.value?.pid != pid ||
+                results.isEmpty() ||
+                scanState is ScanState.Scanning
+            ) break
             viewModel.refreshValues()
         }
+    }
+
+    LaunchedEffect(selectedProcess?.pid) {
+        showBulkWriteDialog = false
+        showSaveDialog = false
+        showLoadDialog = false
     }
 
     Scaffold(
@@ -146,8 +158,17 @@ fun ResultsScreen(
                 title = {
                     Column {
                         Text("Results", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        val subtitle = if (selectedCount > 0) "$selectedCount of ${results.size} selected" else "${results.size} address${if (results.size != 1) "es" else ""}"
-                        Text(subtitle, color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        val subtitle = when {
+                            selectedProcess == null -> "No process selected"
+                            selectedCount > 0 -> "$selectedCount of ${results.size} selected · PID ${selectedProcess!!.pid}"
+                            else -> "${results.size} address${if (results.size != 1) "es" else ""} · PID ${selectedProcess!!.pid}"
+                        }
+                        Text(
+                            subtitle,
+                            color = if (selectedProcess != null) Accent else Warning,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
                     }
                 },
                 navigationIcon = {
@@ -158,30 +179,6 @@ fun ResultsScreen(
                     }
                 },
                 actions = {
-                    // Speed Hack button
-                    val speedState by SpeedControl.state.collectAsState()
-                    IconButton(
-                        onClick = { 
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            if (speedState.state == SpeedHackState.ACTIVE) {
-                                viewModel.deactivateSpeedHack()
-                            } else {
-                                viewModel.activateSpeedHack()
-                            }
-                        }
-                    ) {
-                        Icon(
-                            Icons.Default.Speed,
-                            contentDescription = "Speed Hack",
-                            tint = when (speedState.state) {
-                                SpeedHackState.ACTIVE -> AccentGreen
-                                SpeedHackState.INJECTING -> Warning
-                                SpeedHackState.FAILED -> Error
-                                else -> Primary
-                            }
-                        )
-                    }
-                    
                     IconButton(onClick = { viewModel.selectAll(!allSelected) }) {
                         Icon(
                             if (allSelected) Icons.Default.Clear else Icons.Default.SelectAll,
@@ -285,17 +282,45 @@ fun ResultsScreen(
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
         if (results.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Box(
-                        Modifier.size(72.dp).clip(RoundedCornerShape(18.dp))
-                            .background(SurfaceVariant),
-                        contentAlignment = Alignment.Center
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (selectedProcess == null) {
+                    NoProcessSelectedBanner()
+                }
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Icon(Icons.Default.Memory, contentDescription = null, tint = SurfaceHigh, modifier = Modifier.size(36.dp))
+                        Box(
+                            Modifier.size(72.dp).clip(RoundedCornerShape(18.dp))
+                                .background(SurfaceVariant),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Memory, contentDescription = null, tint = SurfaceHigh, modifier = Modifier.size(36.dp))
+                        }
+                        Text(
+                            if (selectedProcess == null) "No process attached" else "No results yet",
+                            color = MaterialTheme.colorScheme.onBackground,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 16.sp
+                        )
+                        Text(
+                            if (selectedProcess == null) {
+                                "Select a target on the Process tab,\nthen run a scan from Scanner"
+                            } else {
+                                "Run a scan on the Scanner tab for\n${selectedProcess!!.displayName()}"
+                            },
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
                     }
-                    Text("No results found", color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                    Text("Try adjusting your search value\nor scan type", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp)
                 }
             }
         } else {
@@ -318,8 +343,7 @@ fun ResultsScreen(
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             scope.launch { snackBarHostState.showSnackbar("Address copied: ${result.addressHex}") }
                         },
-                        onDelete = { viewModel.removeResult(result.address) },
-                        modifier = Modifier.animateItemPlacement()
+                        onDelete = { viewModel.removeResult(result.address) }
                     )
                 }
             }

@@ -9,12 +9,9 @@
 #include <android/log.h>
 #include <fcntl.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <errno.h>
 
-// Android NDK doesn't expose __NR_ constants directly in some versions
-// Use SYS_ constants from syscall.h
 #ifndef SYS_clock_gettime
 #define SYS_clock_gettime __NR_clock_gettime
 #endif
@@ -30,13 +27,13 @@
 #define DEFAULT_SPEED 1.0f
 #define MAX_SPEED 100.0f
 
-typedef int (*clock_gettime_t)(clockid_t clk_id, struct timespec *tp);
-typedef int (*gettimeofday_t)(struct timeval *tv, struct timezone *tz);
-typedef time_t (*time_t_func)(time_t *tloc);
+typedef int (*clock_gettime_fn)(clockid_t clk_id, struct timespec *tp);
+typedef int (*gettimeofday_fn)(struct timeval *tv, struct timezone *tz);
+typedef time_t (*time_fn)(time_t *tloc);
 
-static clock_gettime_t orig_clock_gettime = NULL;
-static gettimeofday_t orig_gettimeofday = NULL;
-static time_t_func orig_time = NULL;
+static clock_gettime_fn orig_clock_gettime = NULL;
+static gettimeofday_fn orig_gettimeofday = NULL;
+static time_fn orig_time = NULL;
 
 static volatile float g_speed_multiplier = DEFAULT_SPEED;
 static volatile int g_initialized = 0;
@@ -48,7 +45,9 @@ static struct timeval g_base_timeval = {0, 0};
 static time_t g_base_time = 0;
 
 static int g_shm_fd = -1;
-static volatile float* g_shm_speed = NULL;
+static volatile float *g_shm_speed = NULL;
+
+extern int arm64_hook(void *target, void *replacement, void **orig_trampoline);
 
 static void init_base_times(void) {
     syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &g_base_monotonic);
@@ -70,109 +69,74 @@ static void update_speed_from_shm(void) {
     }
 }
 
-static void ensure_init(void) {
-    if (g_initialized) return;
-    
-    orig_clock_gettime = (clock_gettime_t)dlsym(RTLD_NEXT, "clock_gettime");
-    orig_gettimeofday = (gettimeofday_t)dlsym(RTLD_NEXT, "gettimeofday");
-    orig_time = (time_t_func)dlsym(RTLD_NEXT, "time");
-    
-    init_base_times();
-    
-    // Use regular file for IPC instead of shm_open (not available on Android)
-    g_shm_fd = open(SHM_PATH, O_RDONLY, 0666);
-    if (g_shm_fd >= 0) {
-        g_shm_speed = mmap(NULL, sizeof(float), PROT_READ, MAP_SHARED, g_shm_fd, 0);
-        if (g_shm_speed == MAP_FAILED) {
-            g_shm_speed = NULL;
-            LOGE("Failed to mmap shared memory");
-        } else {
-            LOGD("Shared memory mapped successfully");
-        }
-    } else {
-        LOGE("Failed to open shared memory: %s", strerror(errno));
-    }
-    
-    g_initialized = 1;
-    LOGD("SpeedHook initialized, speed=%.2f", g_speed_multiplier);
-}
-
 static void scale_timespec(struct timespec *tp, const struct timespec *base) {
     if (!g_hook_active || g_speed_multiplier == 1.0f) return;
-    
+
     long long base_ns = (long long)base->tv_sec * 1000000000LL + base->tv_nsec;
     long long curr_ns = (long long)tp->tv_sec * 1000000000LL + tp->tv_nsec;
     long long diff_ns = curr_ns - base_ns;
-    
     if (diff_ns < 0) diff_ns = 0;
-    
+
     long long scaled_diff = (long long)((double)diff_ns * g_speed_multiplier);
     long long result_ns = base_ns + scaled_diff;
-    
     tp->tv_sec = result_ns / 1000000000LL;
     tp->tv_nsec = result_ns % 1000000000LL;
 }
 
 static void scale_timeval(struct timeval *tv, const struct timeval *base) {
     if (!g_hook_active || g_speed_multiplier == 1.0f) return;
-    
+
     long long base_us = (long long)base->tv_sec * 1000000LL + base->tv_usec;
     long long curr_us = (long long)tv->tv_sec * 1000000LL + tv->tv_usec;
     long long diff_us = curr_us - base_us;
-    
     if (diff_us < 0) diff_us = 0;
-    
+
     long long scaled_diff = (long long)((double)diff_us * g_speed_multiplier);
     long long result_us = base_us + scaled_diff;
-    
     tv->tv_sec = result_us / 1000000LL;
     tv->tv_usec = result_us % 1000000LL;
 }
 
-int clock_gettime(clockid_t clk_id, struct timespec *tp) {
-    ensure_init();
+static int hooked_clock_gettime(clockid_t clk_id, struct timespec *tp) {
     update_speed_from_shm();
-    
+
     int ret;
     if (orig_clock_gettime) {
         ret = orig_clock_gettime(clk_id, tp);
     } else {
         ret = syscall(SYS_clock_gettime, clk_id, tp);
     }
-    
-    if (ret == 0) {
-        if (clk_id == CLOCK_MONOTONIC || clk_id == CLOCK_MONOTONIC_RAW) {
+
+    if (ret == 0 && tp != NULL) {
+        if (clk_id == CLOCK_MONOTONIC || clk_id == CLOCK_MONOTONIC_RAW ||
+            clk_id == CLOCK_BOOTTIME) {
             scale_timespec(tp, &g_base_monotonic);
         } else if (clk_id == CLOCK_REALTIME) {
             scale_timespec(tp, &g_base_real);
         }
     }
-    
     return ret;
 }
 
-int gettimeofday(struct timeval *tv, struct timezone *tz) {
-    ensure_init();
+static int hooked_gettimeofday(struct timeval *tv, struct timezone *tz) {
     update_speed_from_shm();
-    
+
     int ret;
     if (orig_gettimeofday) {
         ret = orig_gettimeofday(tv, tz);
     } else {
         ret = syscall(SYS_gettimeofday, tv, tz);
     }
-    
+
     if (ret == 0 && tv != NULL) {
         scale_timeval(tv, &g_base_timeval);
     }
-    
     return ret;
 }
 
-time_t time(time_t *tloc) {
-    ensure_init();
+static time_t hooked_time(time_t *tloc) {
     update_speed_from_shm();
-    
+
     time_t ret;
     if (orig_time) {
         ret = orig_time(tloc);
@@ -181,25 +145,74 @@ time_t time(time_t *tloc) {
         syscall(SYS_gettimeofday, &tv, NULL);
         ret = tv.tv_sec;
     }
-    
+
     if (g_hook_active && g_speed_multiplier != 1.0f) {
         time_t base = g_base_time;
         time_t diff = ret - base;
         if (diff < 0) diff = 0;
         ret = base + (time_t)((double)diff * g_speed_multiplier);
     }
-    
-    if (tloc != NULL) {
-        *tloc = ret;
-    }
-    
+
+    if (tloc != NULL) *tloc = ret;
     return ret;
 }
 
-// Speed control can be set via shared memory - no JNI needed for now
-// Keeping this simple to avoid JNI complexity
+static void install_hooks(void) {
+    void *libc = dlopen("libc.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!libc) libc = dlopen("libc.so", RTLD_NOW);
+    if (!libc) {
+        LOGE("Failed to open libc.so");
+        return;
+    }
 
-// Constructor attribute to auto-init
+    void *sym;
+
+    sym = dlsym(libc, "clock_gettime");
+    if (sym && arm64_hook(sym, (void *)hooked_clock_gettime, (void **)&orig_clock_gettime) != 0) {
+        LOGE("Failed to hook clock_gettime");
+        orig_clock_gettime = (clock_gettime_fn)sym;
+    }
+
+    sym = dlsym(libc, "gettimeofday");
+    if (sym && arm64_hook(sym, (void *)hooked_gettimeofday, (void **)&orig_gettimeofday) != 0) {
+        LOGE("Failed to hook gettimeofday");
+        orig_gettimeofday = (gettimeofday_fn)sym;
+    }
+
+    sym = dlsym(libc, "time");
+    if (sym && arm64_hook(sym, (void *)hooked_time, (void **)&orig_time) != 0) {
+        LOGE("Failed to hook time");
+        orig_time = (time_fn)sym;
+    }
+
+    dlclose(libc);
+    LOGD("Hooks installed: clock_gettime=%p gettimeofday=%p time=%p",
+         (void *)orig_clock_gettime, (void *)orig_gettimeofday, (void *)orig_time);
+}
+
+static void ensure_init(void) {
+    if (g_initialized) return;
+
+    init_base_times();
+
+    g_shm_fd = open(SHM_PATH, O_RDONLY);
+    if (g_shm_fd >= 0) {
+        g_shm_speed = mmap(NULL, sizeof(float), PROT_READ, MAP_SHARED, g_shm_fd, 0);
+        if (g_shm_speed == MAP_FAILED) {
+            g_shm_speed = NULL;
+            LOGE("Failed to mmap shared memory");
+        } else {
+            LOGD("Shared memory mapped");
+        }
+    } else {
+        LOGE("Failed to open shared memory: %s", strerror(errno));
+    }
+
+    install_hooks();
+    g_initialized = 1;
+    LOGD("SpeedHook ready, speed=%.2f", g_speed_multiplier);
+}
+
 __attribute__((constructor))
 static void speedhook_init(void) {
     LOGD("SpeedHook library loaded");

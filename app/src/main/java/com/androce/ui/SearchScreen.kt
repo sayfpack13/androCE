@@ -3,8 +3,8 @@ package com.androce.ui
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import com.androce.ui.components.rememberAnimatedFloat
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
@@ -40,7 +40,7 @@ import androidx.compose.material.icons.filled.QuestionMark
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import com.androce.ui.components.SpinningLoader
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -78,6 +78,8 @@ import androidx.compose.ui.unit.sp
 import com.androce.core.ScanProgress
 import com.androce.model.ScanComparison
 import com.androce.model.ValueType
+import com.androce.ui.components.AttachedProcessBanner
+import com.androce.ui.components.NoProcessSelectedBanner
 import com.androce.model.ValueTypeCategory
 import com.androce.ui.theme.Accent
 import com.androce.ui.theme.AccentGreen
@@ -104,6 +106,7 @@ fun SearchScreen(
     val results by viewModel.results.collectAsState()
     val regions by viewModel.regions.collectAsState()
     val isPaused by viewModel.isPaused.collectAsState()
+    val selectedProcess by viewModel.selectedProcess.collectAsState()
     val haptic = LocalHapticFeedback.current
 
     var searchInput by remember { mutableStateOf(viewModel.searchInput) }
@@ -111,16 +114,22 @@ fun SearchScreen(
     var xorKey by remember { mutableStateOf(viewModel.xorKey.toString()) }
     var rangeMin by remember { mutableStateOf(viewModel.rangeMin) }
     var rangeMax by remember { mutableStateOf(viewModel.rangeMax) }
+    LaunchedEffect(selectedProcess?.pid) {
+        viewModel.cancelScan()
+    }
+
     fun triggerScan() {
-        if (searchInput.isBlank()) return
+        if (selectedProcess == null || searchInput.isBlank()) return
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         viewModel.searchInput = searchInput
         viewModel.selectedValueType = selectedType
-        if (viewModel.regions.value.isEmpty()) {
+        if (regions.isEmpty()) {
             viewModel.loadRegions()
         }
         viewModel.firstScan()
     }
+
+    val scansEnabled = selectedProcess != null
 
     Scaffold(
         topBar = {
@@ -129,8 +138,10 @@ fun SearchScreen(
                     Column {
                         Text("Memory Search", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
                         Text(
-                            viewModel.selectedProcess.value?.let { "${it.name}  [PID ${it.pid}]" } ?: "",
-                            color = Accent, fontSize = 12.sp, fontFamily = FontFamily.Monospace
+                            selectedProcess?.let { "${it.displayName()}  [PID ${it.pid}]" } ?: "No process selected",
+                            color = if (selectedProcess != null) Accent else Warning,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace
                         )
                     }
                 },
@@ -151,6 +162,11 @@ fun SearchScreen(
         containerColor = Background
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
+            if (selectedProcess == null) {
+                NoProcessSelectedBanner(Modifier.padding(bottom = 12.dp))
+            } else {
+                AttachedProcessBanner(selectedProcess!!, Modifier.padding(bottom = 12.dp))
+            }
             ScanTab(
                 scanState = scanState,
                 results = results,
@@ -162,6 +178,7 @@ fun SearchScreen(
                 xorKey = xorKey,
                 isScanning = scanState is ScanState.Scanning,
                 isPaused = isPaused,
+                scansEnabled = scansEnabled,
                 onSearchChange = { searchInput = it; viewModel.searchInput = it },
                 onRangeMinChange = { rangeMin = it; viewModel.rangeMin = it },
                 onRangeMaxChange = { rangeMax = it; viewModel.rangeMax = it },
@@ -172,12 +189,14 @@ fun SearchScreen(
                 onXorChange = { xorKey = it; viewModel.xorKey = it.toLongOrNull() ?: 0L },
                 onFirstScan = { triggerScan() },
                 onRefinedScan = {
+                    if (!scansEnabled) return@ScanTab
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     viewModel.searchInput = searchInput
                     viewModel.selectedValueType = selectedType
                     viewModel.refinedScan()
                 },
                 onComparison = { op ->
+                    if (!scansEnabled) return@ScanTab
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     viewModel.searchInput = searchInput
                     viewModel.rangeMin = rangeMin
@@ -186,6 +205,7 @@ fun SearchScreen(
                     viewModel.comparisonScan(op)
                 },
                 onUnknownInitial = {
+                    if (!scansEnabled) return@ScanTab
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     viewModel.selectedValueType = selectedType
                     viewModel.unknownInitialScan()
@@ -211,6 +231,7 @@ private fun ScanTab(
     xorKey: String,
     isScanning: Boolean,
     isPaused: Boolean,
+    scansEnabled: Boolean = true,
     onSearchChange: (String) -> Unit,
     onRangeMinChange: (String) -> Unit,
     onRangeMaxChange: (String) -> Unit,
@@ -277,6 +298,7 @@ private fun ScanTab(
         if (results.isEmpty() && !selectedType.isVariableLength && !isScanning) {
             Button(
                 onClick = onUnknownInitial,
+                enabled = scansEnabled,
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant)
             ) {
@@ -297,6 +319,7 @@ private fun ScanTab(
                 searchInput = searchInput,
                 rangeMin = rangeMin,
                 rangeMax = rangeMax,
+                scansEnabled = scansEnabled,
                 onRangeMinChange = onRangeMinChange,
                 onRangeMaxChange = onRangeMaxChange,
                 onComparison = onComparison
@@ -381,7 +404,7 @@ private fun ScanTab(
                         // No results yet: only First Scan
                         Button(
                             onClick = onFirstScan,
-                            enabled = searchInput.isNotBlank() && inputValid,
+                            enabled = scansEnabled && searchInput.isNotBlank() && inputValid,
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Primary)
                         ) {
@@ -393,7 +416,7 @@ private fun ScanTab(
                         // Results exist: show refined scan + comparison + reset
                         Button(
                             onClick = onRefinedScan,
-                            enabled = searchInput.isNotBlank() && inputValid,
+                            enabled = scansEnabled && searchInput.isNotBlank() && inputValid,
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Accent)
                         ) {
@@ -404,7 +427,7 @@ private fun ScanTab(
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Button(
                                 onClick = onFirstScan,
-                                enabled = searchInput.isNotBlank() && inputValid,
+                                enabled = scansEnabled && searchInput.isNotBlank() && inputValid,
                                 modifier = Modifier.weight(1f),
                                 colors = ButtonDefaults.buttonColors(containerColor = Primary)
                             ) {
@@ -532,6 +555,7 @@ private fun ComparisonControlRow(
     searchInput: String,
     rangeMin: String,
     rangeMax: String,
+    scansEnabled: Boolean,
     onRangeMinChange: (String) -> Unit,
     onRangeMaxChange: (String) -> Unit,
     onComparison: (ScanComparison) -> Unit
@@ -549,7 +573,7 @@ private fun ComparisonControlRow(
                     Modifier.clip(RoundedCornerShape(18.dp))
                         .background(if (isSel) Primary.copy(alpha = 0.2f) else SurfaceVariant)
                         .border(1.dp, if (isSel) Primary else SurfaceHigh, RoundedCornerShape(18.dp))
-                        .clickable {
+                        .clickable(enabled = scansEnabled) {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             selectedOp = ScanComparison.withoutValue[i]
                             onComparison(ScanComparison.withoutValue[i])
@@ -566,7 +590,7 @@ private fun ComparisonControlRow(
             items(valueOps.size) { i ->
                 val op = valueOps[i]
                 val isSel = selectedOp == op
-                val enabled = when (op) {
+                val enabled = scansEnabled && when (op) {
                     ScanComparison.BETWEEN -> true // BETWEEN uses range inputs
                     else -> hasValue // EXACT / INCREASED_BY / DECREASED_BY need searchInput
                 }
@@ -622,7 +646,7 @@ private fun ComparisonControlRow(
             }
             Button(
                 onClick = { onComparison(ScanComparison.BETWEEN) },
-                enabled = rangeMin.isNotBlank() && rangeMax.isNotBlank(),
+                enabled = scansEnabled && rangeMin.isNotBlank() && rangeMax.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = Accent)
             ) {
@@ -634,7 +658,12 @@ private fun ComparisonControlRow(
 
 @Composable
 private fun ScanProgressCard(progress: ScanProgress) {
-    val animFraction by animateFloatAsState(if (progress.totalRegions > 0) progress.scannedRegions.toFloat() / progress.totalRegions else 0f, tween(300), label = "progress")
+    val targetFraction = if (progress.totalRegions > 0) {
+        progress.scannedRegions.toFloat() / progress.totalRegions
+    } else {
+        0f
+    }
+    val animFraction = rememberAnimatedFloat(targetFraction, tween(300), label = "progress")
     val percent = (animFraction * 100).toInt()
 
     Column(
@@ -643,7 +672,7 @@ private fun ScanProgressCard(progress: ScanProgress) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Primary, strokeWidth = 2.dp)
+                SpinningLoader(size = 18.dp, color = Primary, strokeWidth = 2.dp)
                 Spacer(Modifier.width(10.dp))
                 Text("${progress.scannedRegions}/${progress.totalRegions} regions", color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp)
             }

@@ -14,6 +14,7 @@ import com.androce.core.MemoryWriter
 import com.androce.core.ScanProgress
 import com.androce.core.Scanner
 import com.androce.core.SpeedControl
+import com.androce.core.SpeedHackState
 import com.androce.core.SpeedInjector
 import com.androce.core.ValueEncoder
 import com.androce.model.CheatTable
@@ -46,25 +47,66 @@ sealed class ScanState {
 
 data class CheatTableMeta(val processName: String, val savedAt: Long, val entryCount: Int)
 
+/** One-shot UI notice after the attached target process changes. */
+data class ProcessChangeNotice(val message: String)
+
 class ScanViewModel : ViewModel() {
 
     private val _selectedProcess = MutableStateFlow<ProcessInfo?>(null)
     val selectedProcess: StateFlow<ProcessInfo?> = _selectedProcess
-    
+
+    private val _processChangeNotice = MutableStateFlow<ProcessChangeNotice?>(null)
+    val processChangeNotice: StateFlow<ProcessChangeNotice?> = _processChangeNotice
+
+    fun clearProcessChangeNotice() {
+        _processChangeNotice.value = null
+    }
+
     fun setSelectedProcess(value: ProcessInfo?) {
         val current = _selectedProcess.value
-        val changed = current?.pid != value?.pid
+        if (current?.pid == value?.pid && current?.packageName == value?.packageName) return
+
+        val previous = current
         _selectedProcess.value = value
-        if (changed) {
-            // Invalidate everything tied to the old PID
-            scanJob?.cancel()
-            _regions.value = emptyList()
-            regionsPid = null
-            _results.value = emptyList()
-            _scanState.value = ScanState.Idle
-            Scanner.paused = false
+        onProcessContextChanged(previous, value)
+
+        _processChangeNotice.value = ProcessChangeNotice(buildProcessChangeMessage(previous, value))
+    }
+
+    private fun buildProcessChangeMessage(previous: ProcessInfo?, new: ProcessInfo?): String = when {
+        new == null ->
+            "Process cleared — scan results, freezes, and speed hack were reset"
+        previous == null ->
+            "Attached to ${new.displayName()} [PID ${new.pid}]"
+        previous.packageName == new.packageName && previous.pid != new.pid ->
+            "${new.displayName()} restarted (PID ${previous.pid} → ${new.pid}) — scan results cleared"
+        else ->
+            "Switched to ${new.displayName()} [PID ${new.pid}] — previous results cleared"
+    }
+
+    /** Drop all state that is tied to a specific target process (PID). */
+    private fun onProcessContextChanged(previous: ProcessInfo?, new: ProcessInfo?) {
+        scanJob?.cancel()
+        Scanner.paused = false
+        _isPaused.value = false
+        _regions.value = emptyList()
+        regionsPid = null
+        _results.value = emptyList()
+        _scanState.value = ScanState.Idle
+
+        freezeService?.clearAll()
+
+        val speed = SpeedControl.state.value
+        if (speed.state == SpeedHackState.ACTIVE || speed.state == SpeedHackState.INJECTING) {
+            SpeedInjector.reset()
+        }
+
+        if (new != null) {
+            loadRegions()
         }
     }
+
+    fun requireSelectedPid(): Int? = _selectedProcess.value?.pid
 
     var selectedValueType: ValueType = ValueType.BYTE4
     var searchInput: String = ""
@@ -698,14 +740,19 @@ class ScanViewModel : ViewModel() {
     private var isRefreshing = false
 
     fun refreshValues() {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = requireSelectedPid() ?: return
+        if (_results.value.isEmpty()) return
         if (isRefreshing) return
         if (_scanState.value is ScanState.Scanning) return
         isRefreshing = true
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val refreshed = Scanner.refreshValues(pid, _results.value)
-                withContext(Dispatchers.Main) { _results.value = refreshed }
+                val snapshot = _results.value
+                if (!isCurrentProcess(pid) || snapshot.isEmpty()) return@launch
+                val refreshed = Scanner.refreshValues(pid, snapshot)
+                withContext(Dispatchers.Main) {
+                    if (isCurrentProcess(pid)) _results.value = refreshed
+                }
             } finally {
                 isRefreshing = false
             }
@@ -950,10 +997,17 @@ class ScanViewModel : ViewModel() {
     }
 
     fun activateSpeedHack() {
-        val pid = selectedProcess.value?.pid ?: return
-        val processName = selectedProcess.value?.name ?: return
-        
+        val process = selectedProcess.value ?: return
+        val pid = process.pid
+        val processName = process.name
+
+        val active = SpeedControl.state.value
+        if (active.state == SpeedHackState.ACTIVE && active.targetPid != pid) {
+            SpeedInjector.reset()
+        }
+
         viewModelScope.launch {
+            if (!isCurrentProcess(pid)) return@launch
             val success = SpeedInjector.inject(pid, processName)
             if (success) {
                 AppLogger.d("ScanViewModel", "Speed hack activated for $processName")
@@ -965,6 +1019,9 @@ class ScanViewModel : ViewModel() {
 
     fun updateSpeedHack(speed: Float) {
         SpeedControl.updateSpeed(speed)
+        if (!SpeedControl.isActive()) return
+        val pid = SpeedControl.state.value.targetPid
+        if (pid != requireSelectedPid()) return
         viewModelScope.launch {
             SpeedInjector.updateSpeed(speed)
         }

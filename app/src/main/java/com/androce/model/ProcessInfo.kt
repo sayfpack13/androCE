@@ -5,4 +5,6 @@ data class ProcessInfo(
     val name: String,
     val packageName: String,
     val appName: String? = null
-)
+) {
+    fun displayName(): String = appName?.takeIf { it.isNotBlank() } ?: name
+}
