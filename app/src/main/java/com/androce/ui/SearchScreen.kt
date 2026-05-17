@@ -114,9 +114,6 @@ fun SearchScreen(
     var xorKey by remember { mutableStateOf(viewModel.xorKey.toString()) }
     var rangeMin by remember { mutableStateOf(viewModel.rangeMin) }
     var rangeMax by remember { mutableStateOf(viewModel.rangeMax) }
-    LaunchedEffect(selectedProcess?.pid) {
-        viewModel.cancelScan()
-    }
 
     fun triggerScan() {
         if (selectedProcess == null || searchInput.isBlank()) return

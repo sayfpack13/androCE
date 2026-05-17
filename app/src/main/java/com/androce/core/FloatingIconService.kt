@@ -14,10 +14,13 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.ProgressBar
 import androidx.core.app.NotificationCompat
 import com.androce.MainActivity
 import com.androce.R
+import kotlinx.coroutines.*
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -33,6 +36,8 @@ class FloatingIconService : Service() {
     private var touchDownY = 0f
     private var isDragging = false
     private var isVisible = true
+    private var progressRing: ProgressBar? = null
+    private var progressUpdateJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -42,6 +47,12 @@ class FloatingIconService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         when (action) {
+            ACTION_STOP -> {
+                removeFloatingIcon()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
             ACTION_HIDE -> {
                 hideFloatingIcon()
                 return START_STICKY
@@ -65,8 +76,33 @@ class FloatingIconService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        progressUpdateJob?.cancel()
         removeFloatingIcon()
         super.onDestroy()
+    }
+
+    private fun startProgressUpdate() {
+        progressUpdateJob?.cancel()
+        progressUpdateJob = CoroutineScope(Dispatchers.Main).launch {
+            while (isActive) {
+                try {
+                    val isScanning = AppPrefs.isScanning
+                    val progress = AppPrefs.scanProgress
+
+                    progressRing?.let { ring ->
+                        if (isScanning) {
+                            ring.visibility = View.VISIBLE
+                            ring.progress = progress
+                        } else {
+                            ring.visibility = View.GONE
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Ignore errors
+                }
+                delay(500) // Update every 500ms
+            }
+        }
     }
 
     private fun createFloatingIconView() {
@@ -126,6 +162,28 @@ class FloatingIconService : Service() {
             )
             alpha = 0.85f
         }
+
+        // Progress ring indicator (circular)
+        progressRing = ProgressBar(this, null, android.R.attr.progressBarStyleLarge).apply {
+            isIndeterminate = false
+            max = 100
+            progress = 0
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            visibility = View.GONE
+        }
+
+        // Wrap in FrameLayout to layer progress ring behind icon
+        floatingView = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(sizePx, sizePx)
+            addView(progressRing!!)
+            addView(iconView)
+        }
+
+        // Start periodic progress update
+        startProgressUpdate()
 
         iconView.setOnTouchListener { _, event ->
             when (event.action) {
@@ -245,5 +303,6 @@ class FloatingIconService : Service() {
         const val DRAG_THRESHOLD_PX = 15
         const val ACTION_HIDE = "com.androce.FloatingIconService.HIDE"
         const val ACTION_SHOW = "com.androce.FloatingIconService.SHOW"
+        const val ACTION_STOP = "com.androce.FloatingIconService.STOP"
     }
 }

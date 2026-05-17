@@ -40,6 +40,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Tab
@@ -569,23 +571,27 @@ private fun SpeedTab(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onAutoEnableChanged(!autoEnableSpeed) },
+                    .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Auto-enable on process select", color = OnBackground, fontSize = 14.sp)
+                    Text("Auto-enable speed hack", color = OnBackground, fontSize = 14.sp)
                     Text(
-                        "Automatically activate speed hack when selecting a process",
+                        "Automatically enable speed hack when selecting a process",
                         color = OnSurface,
                         fontSize = 12.sp
                     )
                 }
-                Icon(
-                    imageVector = if (autoEnableSpeed) Icons.Default.CheckCircle else Icons.Default.Error,
-                    contentDescription = null,
-                    tint = if (autoEnableSpeed) AccentGreen else OnSurface.copy(alpha = 0.3f),
-                    modifier = Modifier.size(24.dp)
+                Switch(
+                    checked = autoEnableSpeed,
+                    onCheckedChange = onAutoEnableChanged,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Primary,
+                        checkedTrackColor = Primary.copy(alpha = 0.5f),
+                        uncheckedThumbColor = OnSurface.copy(alpha = 0.5f),
+                        uncheckedTrackColor = OnSurface.copy(alpha = 0.2f)
+                    )
                 )
             }
         }
@@ -685,11 +691,15 @@ private fun GeneralTab(
                         fontSize = 12.sp
                     )
                 }
-                Icon(
-                    imageVector = if (floatingIconEnabled) Icons.Default.CheckCircle else Icons.Default.Error,
-                    contentDescription = null,
-                    tint = if (floatingIconEnabled) AccentGreen else OnSurface.copy(alpha = 0.3f),
-                    modifier = Modifier.size(24.dp)
+                Switch(
+                    checked = floatingIconEnabled,
+                    onCheckedChange = onFloatingIconChanged,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Primary,
+                        checkedTrackColor = Primary.copy(alpha = 0.5f),
+                        uncheckedThumbColor = OnSurface.copy(alpha = 0.5f),
+                        uncheckedTrackColor = OnSurface.copy(alpha = 0.2f)
+                    )
                 )
             }
         }

@@ -70,4 +70,16 @@ object AppPrefs {
     var floatingIconY: Int
         get() = prefs.getInt("floating_icon_y", -1)
         set(value) = prefs.edit().putInt("floating_icon_y", value).apply()
+
+    // --- Scan State for Floating Icon ---
+
+    /** Whether a scan is currently running. Default false. */
+    var isScanning: Boolean
+        get() = prefs.getBoolean("is_scanning", false)
+        set(value) = prefs.edit().putBoolean("is_scanning", value).apply()
+
+    /** Scan progress percentage (0-100). Default 0. */
+    var scanProgress: Int
+        get() = prefs.getInt("scan_progress", 0)
+        set(value) = prefs.edit().putInt("scan_progress", value).apply()
 }

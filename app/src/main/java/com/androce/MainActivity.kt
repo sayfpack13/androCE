@@ -29,6 +29,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.Alignment
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
@@ -36,7 +38,7 @@ import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.Memory
@@ -106,6 +108,7 @@ class MainActivity : ComponentActivity() {
     private val isLoading = mutableStateOf(true)
     private val hasRoot = mutableStateOf(false)
     private val showRootError = mutableStateOf(false)
+    private val showExitDialog = mutableStateOf(false)
 
     fun canDrawOverlays(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -164,6 +167,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        // Don't pause scan when app goes to background - scan continues
         // Show floating icon when app goes to background
         if (AppPrefs.floatingIconEnabled) {
             showFloatingIcon()
@@ -203,6 +207,8 @@ class MainActivity : ComponentActivity() {
                 var selectedTab by remember { bottomTab }
                 val snackbarHostState = remember { SnackbarHostState() }
                 val processChangeNotice by scanVm.processChangeNotice.collectAsState()
+                val selectedProcess by scanVm.selectedProcess.collectAsState()
+                val results by scanVm.results.collectAsState()
                 var loading by remember { isLoading }
                 var hasRootAccess by remember { hasRoot }
 
@@ -253,7 +259,7 @@ class MainActivity : ComponentActivity() {
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
                             Icon(
-                                Icons.Default.Error,
+                                Icons.Default.Close,
                                 contentDescription = null,
                                 tint = Error,
                                 modifier = Modifier.size(64.dp)
@@ -285,29 +291,31 @@ class MainActivity : ComponentActivity() {
                     topBar = {
                         @OptIn(ExperimentalMaterial3Api::class)
                         TopAppBar(
+                            modifier = Modifier.height(64.dp),
                             title = { },
                             navigationIcon = {
-                                if (AppPrefs.floatingIconEnabled) {
-                                    TextButton(
-                                        onClick = { moveTaskToBack(true) }
-                                    ) {
-                                        Text(
-                                            "Back to Game",
-                                            color = Primary,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.Medium
-                                        )
-                                    }
+                                TextButton(
+                                    onClick = { moveTaskToBack(true) },
+                                    modifier = Modifier.padding(horizontal = 12.dp)
+                                ) {
+                                    Text(
+                                        "Minimize",
+                                        color = Primary,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
                                 }
                             },
                             actions = {
                                 IconButton(
-                                    onClick = { finish() }
+                                    onClick = { showExitDialog.value = true },
+                                    modifier = Modifier.size(56.dp)
                                 ) {
                                     Icon(
-                                        Icons.Default.Error,
+                                        Icons.Default.Close,
                                         contentDescription = "Exit",
-                                        tint = Error
+                                        tint = Error,
+                                        modifier = Modifier.size(28.dp)
                                     )
                                 }
                             },
@@ -334,6 +342,7 @@ class MainActivity : ComponentActivity() {
                                 BottomNavTab(
                                     icon = if (selectedTab == 0) Icons.Filled.Apps else Icons.Outlined.Apps,
                                     label = "Process",
+                                    badge = selectedProcess?.displayName(),
                                     selected = selectedTab == 0,
                                     onClick = { selectedTab = 0 }
                                 )
@@ -346,6 +355,7 @@ class MainActivity : ComponentActivity() {
                                 BottomNavTab(
                                     icon = if (selectedTab == 2) Icons.AutoMirrored.Filled.Article else Icons.AutoMirrored.Outlined.Article,
                                     label = "Results",
+                                    badge = if (results.isNotEmpty()) results.size.toString() else null,
                                     selected = selectedTab == 2,
                                     onClick = { selectedTab = 2 }
                                 )
@@ -403,7 +413,32 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
-                }
+
+            if (showExitDialog.value) {
+                AlertDialog(
+                    onDismissRequest = { showExitDialog.value = false },
+                    title = { Text("Exit androCE?", color = OnBackground) },
+                    text = { Text("Are you sure you want to exit the app?", color = OnBackground.copy(alpha = 0.7f)) },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            val intent = Intent(this, com.androce.core.FloatingIconService::class.java)
+                            intent.action = com.androce.core.FloatingIconService.ACTION_STOP
+                            startService(intent)
+                            finish()
+                        }) {
+                            Text("Exit", color = Error)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showExitDialog.value = false }) {
+                            Text("Cancel", color = OnBackground)
+                        }
+                    },
+                    containerColor = SurfaceColor,
+                    shape = RoundedCornerShape(16.dp)
+                )
+            }
+            }
         }
     }
 }
@@ -412,6 +447,7 @@ class MainActivity : ComponentActivity() {
 private fun BottomNavTab(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
+    badge: String? = null,
     selected: Boolean,
     onClick: () -> Unit
 ) {
@@ -424,5 +460,14 @@ private fun BottomNavTab(
     ) {
         Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(20.dp))
         Text(label, color = tint, fontSize = 10.sp)
+        badge?.let {
+            Text(
+                it,
+                color = Primary,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
     }
 }

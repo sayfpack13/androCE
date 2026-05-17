@@ -8,6 +8,7 @@ import android.os.IBinder
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.androce.core.AppLogger
+import com.androce.core.AppPrefs
 import com.androce.core.FreezeService
 import com.androce.core.MemoryReader
 import com.androce.core.MemoryWriter
@@ -230,6 +231,8 @@ class ScanViewModel : ViewModel() {
                 try {
                     withContext(Dispatchers.Main) {
                         _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
+                        AppPrefs.isScanning = true
+                        AppPrefs.scanProgress = 0
                     }
                     val regions = getOrLoadRegions(pid)
 
@@ -277,6 +280,10 @@ class ScanViewModel : ViewModel() {
                                     viewModelScope.launch(Dispatchers.Main) {
                                         _scanState.value =
                                             ScanState.Scanning(progress.copy(foundCount = allResults.size + progress.foundCount))
+                                        val progressPercent = if (progress.totalRegions > 0) {
+                                            (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
+                                        } else 0
+                                        AppPrefs.scanProgress = progressPercent
                                     }
                                 }
                             }
@@ -308,6 +315,8 @@ class ScanViewModel : ViewModel() {
                 try {
                     withContext(Dispatchers.Main) {
                         _scanState.value = ScanState.Scanning(ScanProgress(0, 0, 0))
+                        AppPrefs.isScanning = true
+                        AppPrefs.scanProgress = 0
                     }
                     val regions = getOrLoadRegions(pid)
 
@@ -329,6 +338,10 @@ class ScanViewModel : ViewModel() {
                                 if (isActive) {
                                     viewModelScope.launch(Dispatchers.Main) {
                                         _scanState.value = ScanState.Scanning(progress.copy(foundCount = progress.foundCount))
+                                        val progressPercent = if (progress.totalRegions > 0) {
+                                            (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
+                                        } else 0
+                                        AppPrefs.scanProgress = progressPercent
                                     }
                                 }
                             }
@@ -346,6 +359,10 @@ class ScanViewModel : ViewModel() {
                                         _scanState.value = ScanState.Scanning(
                                             progress.copy(foundCount = utf8Results.size + progress.foundCount)
                                         )
+                                        val progressPercent = if (progress.totalRegions > 0) {
+                                            (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
+                                        } else 0
+                                        AppPrefs.scanProgress = progressPercent
                                     }
                                 }
                             }
@@ -381,6 +398,10 @@ class ScanViewModel : ViewModel() {
                                 if (isActive) {
                                     viewModelScope.launch(Dispatchers.Main) {
                                         _scanState.value = ScanState.Scanning(progress)
+                                        val progressPercent = if (progress.totalRegions > 0) {
+                                            (progress.scannedRegions * 100 / progress.totalRegions).coerceIn(0, 100)
+                                        } else 0
+                                        AppPrefs.scanProgress = progressPercent
                                     }
                                 }
                             }
@@ -391,12 +412,16 @@ class ScanViewModel : ViewModel() {
                         withContext(Dispatchers.Main) {
                             _results.value = allResults
                             _scanState.value = ScanState.Done(allResults)
+                            AppPrefs.isScanning = false
+                            AppPrefs.scanProgress = 100
                         }
                     }
                 } catch (e: Exception) {
                     if (isActive) {
                         withContext(Dispatchers.Main) {
                             _scanState.value = ScanState.Error(e.message ?: "Scan failed")
+                            AppPrefs.isScanning = false
+                            AppPrefs.scanProgress = 0
                         }
                     }
                 }
