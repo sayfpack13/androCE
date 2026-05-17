@@ -1,9 +1,6 @@
 package com.androce.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.Image
@@ -33,18 +30,11 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import com.androce.ui.components.SpinningLoader
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -68,8 +58,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import com.androce.model.ProcessInfo
+import com.androce.ui.components.AppCard
+import com.androce.ui.components.AppChip
+import com.androce.ui.components.AppDimensions
+import com.androce.ui.components.AppIconButton
+import com.androce.ui.components.AppSearchField
+import com.androce.ui.components.AppTextField
+import com.androce.ui.components.EmptyState
+import com.androce.ui.components.ScreenScaffold
 import com.androce.ui.theme.Accent
+import com.androce.ui.theme.AccentGreen
 import com.androce.ui.theme.Background
+import com.androce.ui.theme.OnBackground
+import com.androce.ui.theme.OnSurface
 import com.androce.ui.theme.Primary
 import com.androce.ui.theme.PrimaryDim
 import com.androce.ui.theme.Surface
@@ -100,109 +101,36 @@ fun ProcessListScreen(
         LaunchedEffect(Unit) { viewModel.loadProcesses(context.packageManager) }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    Brush.linearGradient(listOf(Primary, Accent))
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                Icons.Default.Memory,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        Spacer(Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                "androCE",
-                                color = OnBackground,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 18.sp
-                            )
-                            Text(
-                                "Memory Scanner",
-                                color = Primary,
-                                fontSize = 10.sp,
-                                letterSpacing = 1.5.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Surface),
-                actions = {
-                    if (!isLoading) {
-                        IconButton(onClick = { viewModel.loadProcesses(context.packageManager) }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary)
-                        }
-                    }
-                }
-            )
-        },
-        containerColor = Background
-    ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            
-            // Selected Process Card - Always visible when process selected
-            if (selectedProcess != null) {
-                SelectedProcessCard(selectedProcess)
+    ScreenScaffold(
+        title = "androCE",
+        subtitle = if (selectedProcess == null) "Memory Scanner" else null,
+        selectedProcess = selectedProcess,
+        showProcessContext = selectedProcess != null,
+        containerColor = Background,
+        actions = {
+            if (!isLoading) {
+                AppIconButton(
+                    icon = Icons.Default.Refresh,
+                    onClick = { viewModel.loadProcesses(context.packageManager) },
+                    contentDescription = "Refresh"
+                )
             }
-
-            OutlinedTextField(
-                value = query,
-                onValueChange = { viewModel.searchQuery.value = it },
-                placeholder = {
-                    Text(
-                        "Search app or PID…",
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-                        fontSize = 14.sp
-                    )
-                },
-                leadingIcon = {
-                    Icon(Icons.Default.Search, contentDescription = null, tint = Primary, modifier = Modifier.size(20.dp))
-                },
-                trailingIcon = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { viewModel.loadProcesses(context.packageManager) }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Primary, modifier = Modifier.size(20.dp))
-                        }
-                        if (query.isNotEmpty()) {
-                            IconButton(onClick = { viewModel.searchQuery.value = "" }) {
-                                Icon(Icons.Default.Clear, contentDescription = "Clear", tint = OnSurface.copy(alpha = 0.5f), modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    }
-                },
+        }
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            // Search Field
+            AppSearchField(
+                query = query,
+                onQueryChange = { viewModel.searchQuery.value = it },
+                placeholder = "Search app or PID...",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                shape = RoundedCornerShape(14.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Primary,
-                    unfocusedBorderColor = SurfaceHigh,
-                    focusedContainerColor = SurfaceVariant,
-                    unfocusedContainerColor = SurfaceVariant,
-                    focusedTextColor = OnBackground,
-                    unfocusedTextColor = OnBackground,
-                    cursorColor = Primary
-                ),
-                singleLine = true
+                    .padding(vertical = 10.dp)
             )
 
             // Search mode chips
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp),
                 modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
             ) {
                 val modes = listOf(
@@ -212,22 +140,11 @@ fun ProcessListScreen(
                 )
                 items(modes.size) { i ->
                     val (mode, label) = modes[i]
-                    val selected = searchMode == mode
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .background(if (selected) Primary else SurfaceVariant)
-                            .border(1.dp, if (selected) Primary else SurfaceHigh, RoundedCornerShape(20.dp))
-                            .clickable { viewModel.searchMode.value = mode }
-                            .padding(horizontal = 14.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            label,
-                            color = if (selected) Color.White else OnSurface,
-                            fontSize = 12.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
+                    AppChip(
+                        label = label,
+                        selected = searchMode == mode,
+                        onClick = { viewModel.searchMode.value = mode }
+                    )
                 }
             }
 
@@ -242,12 +159,12 @@ fun ProcessListScreen(
                         if (isLoading && filtered.isEmpty()) {
                             LoadingView()
                         } else if (filtered.isEmpty() && query.isNotBlank()) {
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Icon(Icons.Default.Search, contentDescription = null, tint = OnSurface.copy(alpha = 0.3f), modifier = Modifier.size(40.dp))
-                                    Text("No matches for \"$query\"", color = OnSurface, fontSize = 14.sp)
-                                }
-                            }
+                            EmptyState(
+                                icon = Icons.Default.Search,
+                                title = "No matches found",
+                                subtitle = "No apps match \"$query\"",
+                                modifier = Modifier.fillMaxSize()
+                            )
                         } else {
                             LazyColumn(
                                 Modifier.fillMaxSize(),
@@ -477,51 +394,3 @@ private fun ProcessRow(
     }
 }
 
-@Composable
-private fun SelectedProcessCard(process: ProcessInfo) {
-    val iconPainter = rememberAppIconPainter(process.packageName)
-    val displayName = process.appName ?: process.name
-    
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        colors = CardDefaults.cardColors(containerColor = Primary.copy(alpha = 0.1f)),
-        shape = RoundedCornerShape(12.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Primary)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                Icons.Default.CheckCircle,
-                contentDescription = null,
-                tint = Primary,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(Modifier.width(8.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Selected Process",
-                    color = Primary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    text = "$displayName (PID: ${process.pid})",
-                    color = OnBackground,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-    }
-}
-
-private val OnBackground = Color(0xFFF0EEFF)
-private val OnSurface = Color(0xFFB0AACC)

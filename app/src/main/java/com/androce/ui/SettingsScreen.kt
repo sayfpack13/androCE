@@ -7,12 +7,15 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -24,12 +27,15 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.InstallDesktop
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -39,20 +45,19 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.TabRowDefaults
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -64,14 +69,28 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.core.AppLogger
 import com.androce.core.AppPrefs
+import com.androce.core.DependencyInstaller
 import com.androce.core.MemoryReader
+import com.androce.ui.components.AppButton
+import com.androce.ui.components.AppCard
+import com.androce.ui.components.AppChip
+import com.androce.ui.components.AppIconButton
+import com.androce.ui.components.AppTextButton
+import com.androce.ui.components.AppTextField
+import com.androce.ui.components.ButtonVariant
+import com.androce.ui.components.InfoBanner
+import com.androce.ui.components.ScreenScaffold
+import com.androce.ui.components.WarningBanner
 import com.androce.ui.theme.AccentGreen
 import com.androce.ui.theme.Background
 import com.androce.ui.theme.Error
@@ -83,6 +102,7 @@ import com.androce.ui.theme.SurfaceVariant
 import com.androce.ui.theme.Warning
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -115,15 +135,46 @@ fun SettingsScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // --- Requirements state ---
+    // --- State declarations (must be before functions that capture them) ---
+    var requirements by remember { mutableStateOf<List<RequirementStatus>>(emptyList()) }
+    var checking by remember { mutableStateOf(RequirementsCache.checking) }
+    var showPythonInstallDialog by remember { mutableStateOf(false) }
+    var showSwapDialog by remember { mutableStateOf(false) }
+    var pythonInstallResult by remember { mutableStateOf<DependencyInstaller.InstallResult?>(null) }
+    var swapOptions by remember { mutableStateOf<List<DependencyInstaller.SwapDisableOption>>(emptyList()) }
+    var swapInfo by remember { mutableStateOf<DependencyInstaller.SwapInfo?>(null) }
+
+    // --- Settings state ---
+    var autoRefreshMs by remember { mutableLongStateOf(AppPrefs.autoRefreshIntervalMs) }
+    var maxResults by remember { mutableIntStateOf(AppPrefs.maxResults) }
+    var maxResultsText by remember { mutableStateOf(AppPrefs.maxResults.toString()) }
+    var defaultFilter by remember { mutableStateOf(AppPrefs.defaultRegionFilter) }
+    var scanEngine by remember { mutableStateOf(AppPrefs.scanEngine) }
+    var freezeMs by remember { mutableLongStateOf(AppPrefs.freezeIntervalMs) }
+    var defaultSpeed by remember { mutableFloatStateOf(AppPrefs.defaultSpeedMultiplier) }
+    var autoEnableSpeed by remember { mutableStateOf(AppPrefs.autoEnableSpeedHack) }
+    var floatingIconEnabled by remember { mutableStateOf(AppPrefs.floatingIconEnabled) }
+    var showClearLogDialog by remember { mutableStateOf(false) }
+
+    // --- Requirements state builder ---
     fun buildStatusList(snapshots: List<RequirementSnapshot>, onRecheck: () -> Unit): List<RequirementStatus> = snapshots.map { snap ->
         val fixAction = if (snap.fixLabel != null && snap.fixCommand != null) {
-            {
-                scope.launch(Dispatchers.IO) {
-                    Shell.cmd(snap.fixCommand).exec()
-                    withContext(Dispatchers.Main) { onRecheck() }
+            when (snap.fixCommand) {
+                "SHOW_SWAP_DIALOG" -> {
+                    { showSwapDialog = true; Unit }
                 }
-                Unit
+                "SHOW_PYTHON_DIALOG" -> {
+                    { showPythonInstallDialog = true; Unit }
+                }
+                else -> {
+                    {
+                        scope.launch(Dispatchers.IO) {
+                            Shell.cmd(snap.fixCommand).exec()
+                            withContext(Dispatchers.Main) { onRecheck() }
+                        }
+                        Unit
+                    }
+                }
             }
         } else {
             null
@@ -136,9 +187,6 @@ fun SettingsScreen() {
             fixAction = fixAction
         )
     }
-
-    var requirements by remember { mutableStateOf(buildStatusList(RequirementsCache.snapshots) {}) }
-    var checking by remember { mutableStateOf(RequirementsCache.checking) }
 
     fun runChecks() {
         if (RequirementsCache.checking) return
@@ -154,19 +202,27 @@ fun SettingsScreen() {
                     else RequirementSnapshot("Root access", "Root not available — app cannot function", RequirementLevel.FAIL)
                 )
 
-                val swapResult = Shell.cmd("cat /proc/swaps 2>/dev/null").exec()
-                val hasSwap = swapResult.out.any { line ->
-                    val trimmed = line.trim()
-                    trimmed.isNotEmpty() && !trimmed.startsWith("Filename")
-                }
+                // Enhanced swap detection
+                val detectedSwapInfo = DependencyInstaller.detectSwapType()
+                swapInfo = detectedSwapInfo
+                swapOptions = DependencyInstaller.getSwapDisableCommands()
+
+                val hasSwap = detectedSwapInfo.hasSwap
+                val swapDetail = if (hasSwap) {
+                    val typeStr = detectedSwapInfo.swapType.name
+                    val sizeStr = "${detectedSwapInfo.totalSizeMB}MB"
+                    val devicesStr = detectedSwapInfo.devices.map { it.filename.substringAfterLast("/") }.take(2).joinToString(", ")
+                    "$typeStr active ($sizeStr): $devicesStr"
+                } else "No swap detected"
+
                 snapshots.add(
-                    if (!hasSwap) RequirementSnapshot("Memory swap", "No swap detected", RequirementLevel.OK)
+                    if (!hasSwap) RequirementSnapshot("Memory swap", swapDetail, RequirementLevel.OK)
                     else RequirementSnapshot(
                         "Memory swap",
-                        "Swap/zRAM active — may cause stale reads",
+                        swapDetail,
                         RequirementLevel.WARN,
-                        fixLabel = "Disable",
-                        fixCommand = "swapoff -a"
+                        fixLabel = "Manage",
+                        fixCommand = "SHOW_SWAP_DIALOG" // Special marker to show dialog
                     )
                 )
 
@@ -198,11 +254,23 @@ fun SettingsScreen() {
                         RequirementSnapshot("Native helper", "Not available — scanning will not work", RequirementLevel.FAIL)
                 )
 
+                val pythonSources = DependencyInstaller.detectPythonSources()
+                val pythonDetail = if (pythonSources.isNotEmpty()) {
+                    val sourceNames = pythonSources.take(2).joinToString(", ") { it.name }
+                    if (pythonSources.size > 2) "$sourceNames +${pythonSources.size - 2} more" else sourceNames
+                } else "Not found — using native only (less accurate)"
+
                 snapshots.add(
-                    if (MemoryReader.isPythonAvailable)
-                        RequirementSnapshot("Python", "Available", RequirementLevel.OK)
+                    if (pythonSources.isNotEmpty())
+                        RequirementSnapshot("Python", pythonDetail, RequirementLevel.OK)
                     else
-                        RequirementSnapshot("Python", "Not found — using native only", RequirementLevel.WARN)
+                        RequirementSnapshot(
+                            "Python",
+                            pythonDetail,
+                            RequirementLevel.WARN,
+                            fixLabel = "Install",
+                            fixCommand = "SHOW_PYTHON_DIALOG"
+                        )
                 )
 
                 withContext(Dispatchers.Main) {
@@ -218,107 +286,71 @@ fun SettingsScreen() {
         }
     }
 
-    if (RequirementsCache.snapshots.isEmpty() && !checking) {
-        runChecks()
+    LaunchedEffect(Unit) {
+        if (RequirementsCache.snapshots.isNotEmpty()) {
+            requirements = buildStatusList(RequirementsCache.snapshots, ::runChecks)
+            checking = RequirementsCache.checking
+        } else if (!RequirementsCache.checking) {
+            runChecks()
+        }
     }
-
-    // --- Settings state ---
-    var autoRefreshMs by remember { mutableLongStateOf(AppPrefs.autoRefreshIntervalMs) }
-    var maxResults by remember { mutableIntStateOf(AppPrefs.maxResults) }
-    var maxResultsText by remember { mutableStateOf(AppPrefs.maxResults.toString()) }
-    var defaultFilter by remember { mutableStateOf(AppPrefs.defaultRegionFilter) }
-    var scanEngine by remember { mutableStateOf(AppPrefs.scanEngine) }
-    var freezeMs by remember { mutableLongStateOf(AppPrefs.freezeIntervalMs) }
-    var defaultSpeed by remember { mutableFloatStateOf(AppPrefs.defaultSpeedMultiplier) }
-    var autoEnableSpeed by remember { mutableStateOf(AppPrefs.autoEnableSpeedHack) }
-    var floatingIconEnabled by remember { mutableStateOf(AppPrefs.floatingIconEnabled) }
-    var showClearLogDialog by remember { mutableStateOf(false) }
 
     // --- Tab state ---
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabTitles = listOf("Status", "Scan", "Speed", "General")
 
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(
-                    title = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Settings, contentDescription = null, tint = Primary, modifier = Modifier.size(24.dp))
-                            Spacer(Modifier.width(10.dp))
-                            Text("Settings", color = OnBackground, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)
-                )
-                TabRow(
-                    selectedTabIndex = selectedTab,
-                    containerColor = Background,
-                    contentColor = Primary,
-                    indicator = { tabPositions ->
-                        if (selectedTab < tabPositions.size) {
-                            TabRowDefaults.SecondaryIndicator(
-                                Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                                color = Primary,
-                                height = 3.dp
-                            )
-                        }
-                    },
-                    divider = {
-                        HorizontalDivider(color = SurfaceVariant, thickness = 0.5.dp)
-                    }
-                ) {
-                    tabTitles.forEachIndexed { index, title ->
-                        Tab(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
-                            text = {
-                                Text(
-                                    title,
-                                    fontSize = 13.sp,
-                                    fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (selectedTab == index) Primary else OnBackground.copy(alpha = 0.5f)
-                                )
+    ScreenScaffold(
+        title = "Settings",
+        containerColor = Background
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            SettingsTabRow(
+                tabs = tabTitles,
+                selectedIndex = selectedTab,
+                onTabSelected = { selectedTab = it }
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                when (selectedTab) {
+                    0 -> StatusTab(requirements, checking, ::runChecks)
+                    1 -> ScanTab(
+                        autoRefreshMs, maxResultsText, defaultFilter, scanEngine, freezeMs,
+                        onAutoRefreshChanged = { autoRefreshMs = it; AppPrefs.autoRefreshIntervalMs = it },
+                        onMaxResultsChanged = { text, value ->
+                            maxResultsText = text
+                            if (value != null) { maxResults = value; AppPrefs.maxResults = value }
+                        },
+                        onFilterChanged = { defaultFilter = it; AppPrefs.defaultRegionFilter = it },
+                        onEngineChanged = { scanEngine = it; AppPrefs.scanEngine = it },
+                        onFreezeChanged = { freezeMs = it; AppPrefs.freezeIntervalMs = it }
+                    )
+                    2 -> SpeedTab(
+                        defaultSpeed, autoEnableSpeed,
+                        onDefaultSpeedChanged = { defaultSpeed = it; AppPrefs.defaultSpeedMultiplier = it },
+                        onAutoEnableChanged = { autoEnableSpeed = it; AppPrefs.autoEnableSpeedHack = it }
+                    )
+                    3 -> GeneralTab(
+                        context, floatingIconEnabled, showClearLogDialog,
+                        onShowClearLog = { showClearLogDialog = it },
+                        onFloatingIconChanged = { enabled ->
+                            floatingIconEnabled = enabled
+                            AppPrefs.floatingIconEnabled = enabled
+                            val activity = context as? com.androce.MainActivity
+                            if (enabled) {
+                                activity?.startFloatingIconServiceIfEnabled()
+                            } else {
+                                activity?.stopFloatingIconService()
                             }
-                        )
-                    }
+                        }
+                    )
                 }
             }
-        },
-        containerColor = Background
-    ) { padding ->
-        when (selectedTab) {
-            0 -> StatusTab(padding, requirements, checking, ::runChecks)
-            1 -> ScanTab(
-                padding, autoRefreshMs, maxResultsText, defaultFilter, scanEngine, freezeMs,
-                onAutoRefreshChanged = { autoRefreshMs = it; AppPrefs.autoRefreshIntervalMs = it },
-                onMaxResultsChanged = { text, value ->
-                    maxResultsText = text
-                    if (value != null) { maxResults = value; AppPrefs.maxResults = value }
-                },
-                onFilterChanged = { defaultFilter = it; AppPrefs.defaultRegionFilter = it },
-                onEngineChanged = { scanEngine = it; AppPrefs.scanEngine = it },
-                onFreezeChanged = { freezeMs = it; AppPrefs.freezeIntervalMs = it }
-            )
-            2 -> SpeedTab(
-                padding, defaultSpeed, autoEnableSpeed,
-                onDefaultSpeedChanged = { defaultSpeed = it; AppPrefs.defaultSpeedMultiplier = it },
-                onAutoEnableChanged = { autoEnableSpeed = it; AppPrefs.autoEnableSpeedHack = it }
-            )
-            3 -> GeneralTab(
-                padding, context, floatingIconEnabled, showClearLogDialog,
-                onShowClearLog = { showClearLogDialog = it },
-                onFloatingIconChanged = { enabled ->
-                    floatingIconEnabled = enabled
-                    AppPrefs.floatingIconEnabled = enabled
-                    val activity = context as? com.androce.MainActivity
-                    if (enabled) {
-                        activity?.startFloatingIconServiceIfEnabled()
-                    } else {
-                        activity?.stopFloatingIconService()
-                    }
-                }
-            )
         }
     }
 
@@ -328,30 +360,124 @@ fun SettingsScreen() {
             title = { Text("Clear logs?", color = OnBackground) },
             text = { Text("This will delete all saved log data.", color = OnBackground.copy(alpha = 0.7f)) },
             confirmButton = {
-                TextButton(onClick = {
-                    AppLogger.clearLog()
-                    showClearLogDialog = false
-                    Toast.makeText(context, "Logs cleared", Toast.LENGTH_SHORT).show()
-                }) {
-                    Text("Clear", color = Error)
-                }
+                AppTextButton(
+                    label = "Clear",
+                    onClick = {
+                        AppLogger.clearLog()
+                        showClearLogDialog = false
+                        Toast.makeText(context, "Logs cleared", Toast.LENGTH_SHORT).show()
+                    },
+                    color = Error
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showClearLogDialog = false }) {
-                    Text("Cancel", color = OnBackground)
-                }
+                AppTextButton(
+                    label = "Cancel",
+                    onClick = { showClearLogDialog = false }
+                )
             },
             containerColor = Surface,
             shape = RoundedCornerShape(16.dp)
         )
+    }
+
+
+    // Swap Management Dialog
+    if (showSwapDialog) {
+        SwapManagementDialog(
+            swapOptions = swapOptions,
+            swapInfo = swapInfo,
+            onDismiss = { showSwapDialog = false },
+            onActionComplete = {
+                scope.launch(Dispatchers.IO) {
+                    withContext(Dispatchers.Main) { runChecks() }
+                }
+            }
+        )
+    }
+
+    // Python Installation Dialog
+    if (showPythonInstallDialog) {
+        PythonInstallDialog(
+            onDismiss = { showPythonInstallDialog = false },
+            onInstallComplete = { result ->
+                pythonInstallResult = result
+                if (result.success) {
+                    scope.launch(Dispatchers.IO) {
+                        MemoryReader.refreshPythonStatus()
+                        withContext(Dispatchers.Main) { runChecks() }
+                    }
+                }
+            }
+        )
+    }
+
+    // Show Python install result toast
+    pythonInstallResult?.let { result ->
+        LaunchedEffect(result) {
+            Toast.makeText(
+                context,
+                if (result.success) "Python installed successfully" else "Python installation failed",
+                Toast.LENGTH_LONG
+            ).show()
+            pythonInstallResult = null
+        }
     }
 }
 
 // ===== Tab content composables =====
 
 @Composable
+private fun SettingsTabRow(
+    tabs: List<String>,
+    selectedIndex: Int,
+    onTabSelected: (Int) -> Unit
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            tabs.forEachIndexed { index, title ->
+                val selected = selectedIndex == index
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clickable { onTabSelected(index) }
+                        .padding(horizontal = 4.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = title,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        color = if (selected) Primary else OnBackground.copy(alpha = 0.5f)
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Box(
+                        Modifier
+                            .height(3.dp)
+                            .width(if (selected) 28.dp else 0.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(if (selected) Primary else Color.Transparent)
+                    )
+                }
+            }
+        }
+        HorizontalDivider(color = SurfaceVariant, thickness = 0.5.dp)
+    }
+}
+
+@Composable
 private fun StatusTab(
-    padding: androidx.compose.foundation.layout.PaddingValues,
     requirements: List<RequirementStatus>,
     checking: Boolean,
     onRecheck: () -> Unit
@@ -359,12 +485,9 @@ private fun StatusTab(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(padding)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Spacer(Modifier.height(4.dp))
 
         // Requirements card
         SettingsCard {
@@ -388,8 +511,10 @@ private fun StatusTab(
             SectionLabel("Tips")
             Spacer(Modifier.height(8.dp))
             TipRow("Python engine finds more results — it reads fresh pages even when memory is swapped or compressed")
+            TipRow("Tap 'Install' next to Python in Status to set up Python automatically via Termux")
+            TipRow("Tap 'Manage' next to Memory swap to see device-specific swap disable options")
             TipRow("Native C may miss values on devices with MemFusion/zRAM due to stale page cache")
-            TipRow("Disable MemFusion/zRAM and reboot before scanning")
+            TipRow("Disable MemFusion/zRAM and reboot before scanning for best accuracy")
             TipRow("Set SELinux to Permissive for best results")
             TipRow("Use Heap/Stack/Anon filter for faster scans")
             TipRow("Narrow results with comparison scans (Increased/Decreased)")
@@ -401,7 +526,6 @@ private fun StatusTab(
 
 @Composable
 private fun ScanTab(
-    padding: androidx.compose.foundation.layout.PaddingValues,
     autoRefreshMs: Long,
     maxResultsText: String,
     defaultFilter: String,
@@ -416,13 +540,9 @@ private fun ScanTab(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(padding)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Spacer(Modifier.height(4.dp))
-
         // Scan settings
         SectionLabel("Scan")
         SettingsCard {
@@ -489,7 +609,6 @@ private fun ScanTab(
 
 @Composable
 private fun SpeedTab(
-    padding: androidx.compose.foundation.layout.PaddingValues,
     defaultSpeed: Float,
     autoEnableSpeed: Boolean,
     onDefaultSpeedChanged: (Float) -> Unit,
@@ -498,13 +617,9 @@ private fun SpeedTab(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(padding)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Spacer(Modifier.height(4.dp))
-
         // Speed Hack settings
         SectionLabel("Speed Hack")
         SettingsCard {
@@ -621,7 +736,6 @@ private fun SpeedTab(
 
 @Composable
 private fun GeneralTab(
-    padding: androidx.compose.foundation.layout.PaddingValues,
     context: Context,
     floatingIconEnabled: Boolean,
     showClearLogDialog: Boolean,
@@ -631,13 +745,9 @@ private fun GeneralTab(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(padding)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Spacer(Modifier.height(4.dp))
-
         // Logs
         SectionLabel("Logs")
         SettingsCard {
@@ -863,4 +973,348 @@ private fun <T> SettingsDropdown(
             }
         }
     }
+}
+
+// ===== Dependency Installation Dialogs =====
+
+@Composable
+private fun PythonInstallDialog(
+    onDismiss: () -> Unit,
+    onInstallComplete: (DependencyInstaller.InstallResult) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var installing by remember { mutableStateOf(false) }
+    var installLog by remember { mutableStateOf("") }
+    var lastResult by remember { mutableStateOf<DependencyInstaller.InstallResult?>(null) }
+
+    fun appendLog(line: String) {
+        installLog = if (installLog.isEmpty()) line else "$installLog\n$line"
+    }
+
+    fun runSetup() {
+        if (installing) return
+        installing = true
+        lastResult = null
+        installLog = ""
+        scope.launch {
+            val result = DependencyInstaller.runPythonSetup { appendLog(it) }
+            installing = false
+            lastResult = result
+            appendLog(if (result.success) "✓ ${result.message}" else "✗ ${result.message}")
+            onInstallComplete(result)
+            Toast.makeText(
+                context,
+                if (result.success) "Python ready" else "Setup needs attention",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!installing) onDismiss() },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.InstallDesktop,
+                    contentDescription = null,
+                    tint = Primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Python Setup", color = OnBackground)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "Python improves scan accuracy on zRAM / MemFusion devices. One tap checks Termux, installs Python if needed, and verifies it works.",
+                    color = OnSurface,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Spacer(Modifier.height(12.dp))
+
+                Button(
+                    onClick = { runSetup() },
+                    enabled = !installing,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Primary)
+                ) {
+                    if (installing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text("Setting up...", color = Color.White, fontWeight = FontWeight.Bold)
+                    } else {
+                        Text(
+                            if (lastResult?.success == true) "Re-check Python" else "Setup Python",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Progress",
+                    color = OnBackground,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = installLog.ifEmpty { "Tap Setup Python to begin." },
+                    color = if (lastResult?.success == true) AccentGreen else OnSurface,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 16.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 80.dp, max = 200.dp)
+                        .verticalScroll(rememberScrollState())
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(SurfaceVariant.copy(alpha = 0.5f))
+                        .padding(8.dp)
+                )
+
+                if (!installing && lastResult?.success != true) {
+                    Spacer(Modifier.height(10.dp))
+                    SettingsCard {
+                        Text(
+                            "If setup fails:\n" +
+                            "1. Install Termux from F-Droid\n" +
+                            "2. Open Termux once\n" +
+                            "3. Run: pkg install python\n" +
+                            "4. Tap Setup Python again",
+                            color = OnBackground.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 18.sp
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !installing) {
+                Text("Close", color = OnBackground)
+            }
+        },
+        containerColor = Surface,
+        shape = RoundedCornerShape(16.dp)
+    )
+}
+
+@Composable
+private fun SwapManagementDialog(
+    swapOptions: List<DependencyInstaller.SwapDisableOption>,
+    swapInfo: DependencyInstaller.SwapInfo?,
+    onDismiss: () -> Unit,
+    onActionComplete: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var processing by remember { mutableStateOf(false) }
+    var processingOption by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = { if (!processing) onDismiss() },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Memory,
+                    contentDescription = null,
+                    tint = Warning,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Memory Swap Management", color = OnBackground)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                swapInfo?.let { info ->
+                    SettingsCard {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    "Current Status",
+                                    color = OnBackground,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "Type: ${info.swapType.name}",
+                                    color = OnSurface,
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    "Total: ${info.totalSizeMB}MB",
+                                    color = OnSurface,
+                                    fontSize = 12.sp
+                                )
+                                Text(
+                                    "Devices: ${info.devices.size}",
+                                    color = OnSurface,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+
+                Text(
+                    "Swap/Compression reduces scan accuracy because memory pages may be compressed or moved. Select an option to disable:",
+                    color = OnSurface,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Spacer(Modifier.height(12.dp))
+
+                if (swapOptions.isEmpty()) {
+                    Text(
+                        "No swap management options detected for this device.",
+                        color = Warning,
+                        fontSize = 13.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Manual command:\nswapoff -a",
+                        color = OnBackground.copy(alpha = 0.8f),
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                } else {
+                    swapOptions.forEach { option ->
+                        val isProcessing = processing && processingOption == option.name
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(enabled = !processing) {
+                                    processing = true
+                                    processingOption = option.name
+                                    scope.launch(Dispatchers.IO) {
+                                        val result = Shell.cmd(option.command).exec()
+                                        withContext(Dispatchers.Main) {
+                                            processing = false
+                                            processingOption = null
+                                            Toast.makeText(
+                                                context,
+                                                if (result.isSuccess) "${option.name} applied" else "Command failed",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                            if (result.isSuccess && option.requiresReboot) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "Reboot required for changes to persist",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                            }
+                                            onActionComplete()
+                                        }
+                                    }
+                                }
+                                .background(SurfaceVariant.copy(alpha = 0.3f))
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (isProcessing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = Primary,
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.Memory,
+                                    contentDescription = null,
+                                    tint = if (option.isPersistent) AccentGreen else Primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        option.name,
+                                        color = OnBackground,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                    if (option.isPersistent) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            "PERSISTENT",
+                                            color = AccentGreen,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(AccentGreen.copy(alpha = 0.2f))
+                                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                    if (option.requiresReboot) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            "REBOOT",
+                                            color = Warning,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(Warning.copy(alpha = 0.2f))
+                                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    option.description,
+                                    color = OnSurface,
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Note: Some changes require reboot to persist. Non-persistent changes will be lost after reboot.",
+                    color = OnSurface.copy(alpha = 0.7f),
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !processing) {
+                Text("Close", color = OnBackground)
+            }
+        },
+        containerColor = Surface,
+        shape = RoundedCornerShape(16.dp)
+    )
 }

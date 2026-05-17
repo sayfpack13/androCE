@@ -48,7 +48,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.viewmodel.ScanViewModel
 import com.androce.viewmodel.CheatTableMeta
+import com.androce.ui.components.AppCard
+import com.androce.ui.components.AppCardWithIcon
+import com.androce.ui.components.AppIconButton
+import com.androce.ui.components.AppTextButton
+import com.androce.ui.components.AppTextField
+import com.androce.ui.components.EmptyState
+import com.androce.ui.components.ScreenScaffold
 import com.androce.ui.theme.Accent
+import com.androce.ui.theme.Background
+import com.androce.ui.theme.Error
+import com.androce.ui.theme.OnBackground
+import com.androce.ui.theme.OnSurface
 import com.androce.ui.theme.Primary
 import com.androce.ui.theme.SurfaceVariant
 import kotlinx.coroutines.launch
@@ -70,41 +81,25 @@ fun SavedTablesScreen(
     var showSaveCurrentDialog by remember { mutableStateOf(false) }
     var saveName by remember { mutableStateOf("") }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text("Saved Lists", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
-                    }
-                },
-                actions = {
-                    TextButton(onClick = { showSaveCurrentDialog = true }) {
-                        Icon(Icons.Default.Save, contentDescription = null, tint = Accent, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Save Current", color = Accent, fontSize = 12.sp)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+    ScreenScaffold(
+        title = "Saved Lists",
+        onBack = onBack,
+        actions = {
+            AppTextButton(
+                label = "Save Current",
+                onClick = { showSaveCurrentDialog = true },
+                icon = Icons.Default.Save
             )
-        }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp)
-        ) {
+        },
+        containerColor = Background
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
             if (tableNames.isEmpty()) {
-                Spacer(Modifier.height(32.dp))
-                Text(
-                    "No saved lists yet.\nSave results from the Results tab.",
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                    fontSize = 14.sp,
-                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                EmptyState(
+                    icon = Icons.Default.FolderOpen,
+                    title = "No saved lists",
+                    subtitle = "Save results from the Results tab to see them here",
+                    modifier = Modifier.fillMaxSize()
                 )
             } else {
                 LazyColumn(
@@ -144,28 +139,30 @@ fun SavedTablesScreen(
         AlertDialog(
             onDismissRequest = { showRenameDialog = false },
             containerColor = MaterialTheme.colorScheme.surface,
-            title = { Text("Rename List", color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold) },
+            title = { Text("Rename List", color = OnBackground, fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
+                AppTextField(
                     value = renameValue,
                     onValueChange = { renameValue = it },
-                    label = { Text("New name") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done)
+                    label = "New name"
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    if (viewModel.renameCheatTable(renameTarget, renameValue)) {
-                        tableNames = viewModel.listSavedTables()
+                AppTextButton(
+                    label = "Rename",
+                    onClick = {
+                        if (viewModel.renameCheatTable(renameTarget, renameValue)) {
+                            tableNames = viewModel.listSavedTables()
+                        }
+                        showRenameDialog = false
                     }
-                    showRenameDialog = false
-                }) { Text("Rename", color = Primary) }
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showRenameDialog = false }) {
-                    Text("Cancel", color = MaterialTheme.colorScheme.onSurface)
-                }
+                AppTextButton(
+                    label = "Cancel",
+                    onClick = { showRenameDialog = false }
+                )
             }
         )
     }
@@ -174,31 +171,33 @@ fun SavedTablesScreen(
         AlertDialog(
             onDismissRequest = { showSaveCurrentDialog = false },
             containerColor = MaterialTheme.colorScheme.surface,
-            title = { Text("Save Current Results", color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold) },
+            title = { Text("Save Current Results", color = OnBackground, fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
+                AppTextField(
                     value = saveName,
                     onValueChange = { saveName = it },
-                    label = { Text("List name") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done)
+                    label = "List name"
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    if (saveName.isNotBlank()) {
-                        if (viewModel.saveCheatTable(saveName)) {
-                            tableNames = viewModel.listSavedTables()
+                AppTextButton(
+                    label = "Save",
+                    onClick = {
+                        if (saveName.isNotBlank()) {
+                            if (viewModel.saveCheatTable(saveName)) {
+                                tableNames = viewModel.listSavedTables()
+                            }
+                            showSaveCurrentDialog = false
+                            saveName = ""
                         }
-                        showSaveCurrentDialog = false
-                        saveName = ""
                     }
-                }) { Text("Save", color = Primary) }
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showSaveCurrentDialog = false }) {
-                    Text("Cancel", color = MaterialTheme.colorScheme.onSurface)
-                }
+                AppTextButton(
+                    label = "Cancel",
+                    onClick = { showSaveCurrentDialog = false }
+                )
             }
         )
     }
@@ -215,33 +214,28 @@ private fun SavedTableRow(
     val dateStr = info?.let {
         SimpleDateFormat("MMM dd, HH:mm", Locale.getDefault()).format(Date(it.savedAt))
     } ?: ""
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(SurfaceVariant)
-            .padding(12.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(name, color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-            Text(
-                "${info?.entryCount ?: 0} addresses · $dateStr · ${info?.processName ?: ""}",
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                fontSize = 11.sp
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            IconButton(onClick = onLoad, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.FolderOpen, contentDescription = "Load", tint = Accent, modifier = Modifier.size(18.dp))
-            }
-            IconButton(onClick = onRename, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.DriveFileRenameOutline, contentDescription = "Rename", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
-            }
-            IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+    
+    AppCardWithIcon(
+        title = name,
+        subtitle = "${info?.entryCount ?: 0} addresses · $dateStr · ${info?.processName ?: ""}",
+        icon = Icons.Default.FolderOpen,
+        iconTint = Accent,
+        onClick = onLoad,
+        actions = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                AppIconButton(
+                    icon = Icons.Default.DriveFileRenameOutline,
+                    onClick = onRename,
+                    tint = OnSurface.copy(alpha = 0.7f),
+                    contentDescription = "Rename"
+                )
+                AppIconButton(
+                    icon = Icons.Default.Delete,
+                    onClick = onDelete,
+                    tint = Error,
+                    contentDescription = "Delete"
+                )
             }
         }
-    }
+    )
 }

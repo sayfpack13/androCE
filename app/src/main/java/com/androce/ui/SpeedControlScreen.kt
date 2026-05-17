@@ -61,7 +61,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.androce.core.SpeedControl
 import com.androce.core.SpeedHackState
-import com.androce.ui.components.AttachedProcessBanner
+import com.androce.ui.components.AppButton
+import com.androce.ui.components.AppCard
+import com.androce.ui.components.AppChip
+import com.androce.ui.components.AppIconButton
+import com.androce.ui.components.ButtonVariant
+import com.androce.ui.components.ScreenScaffold
+import com.androce.ui.components.StatusBadge
 import com.androce.model.ProcessInfo
 import com.androce.ui.theme.Accent
 import com.androce.ui.theme.AccentGreen
@@ -104,39 +110,18 @@ fun SpeedControlScreen(
         }
     }
     
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Speed Hack", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        Text(
-                            selectedProcess?.let { "${it.displayName()}  [PID ${it.pid}]" } ?: "No process selected",
-                            color = Accent, fontSize = 12.sp
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)
-            )
-        },
+    ScreenScaffold(
+        title = "Speed Hack",
+        selectedProcess = selectedProcess,
+        showProcessContext = true,
         containerColor = Background
-    ) { padding ->
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            Spacer(modifier = Modifier.height(8.dp))
-            
-            if (selectedProcess == null) {
-                NoProcessWarningCard()
-            } else {
-                AttachedProcessBanner(selectedProcess!!)
-            }
-
             // Status Card
             StatusCard(speedState.state, speedState.errorMessage)
             
@@ -408,42 +393,6 @@ private fun PresetButtons(
     }
 }
 
-@Composable
-private fun NoProcessWarningCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Error.copy(alpha = 0.1f)),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                Icons.Default.Warning,
-                contentDescription = null,
-                tint = Warning,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(12.dp))
-            Column {
-                Text(
-                    "No Process Selected",
-                    color = Warning,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp
-                )
-                Text(
-                    "Go to Process tab and select an app first",
-                    color = OnSurface,
-                    fontSize = 12.sp
-                )
-            }
-        }
-    }
-}
 
 @Composable
 private fun ControlButtons(
@@ -459,64 +408,42 @@ private fun ControlButtons(
     ) {
         when (state) {
             SpeedHackState.IDLE, SpeedHackState.FAILED -> {
-                Button(
+                AppButton(
+                    label = if (hasProcess) "Activate" else "Select Process First",
                     onClick = onActivate,
                     modifier = Modifier.weight(1f),
                     enabled = hasProcess,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (hasProcess) AccentGreen else SurfaceHigh,
-                        disabledContainerColor = SurfaceHigh
-                    ),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        if (hasProcess) "Activate" else "Select Process First",
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                    variant = ButtonVariant.Primary,
+                    icon = Icons.Default.PlayArrow
+                )
             }
             
             SpeedHackState.INJECTING -> {
-                Button(
+                AppButton(
+                    label = "Injecting...",
                     onClick = { },
                     modifier = Modifier.weight(1f),
                     enabled = false,
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    SpinningLoader(
-                        size = 18.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Injecting...")
-                }
+                    variant = ButtonVariant.Secondary
+                )
             }
             
             SpeedHackState.ACTIVE -> {
-                Button(
+                AppButton(
+                    label = "Deactivate",
                     onClick = onDeactivate,
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Error.copy(alpha = 0.9f)),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Icon(Icons.Default.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Deactivate", fontWeight = FontWeight.Bold)
-                }
+                    variant = ButtonVariant.Danger,
+                    icon = Icons.Default.Stop
+                )
                 
-                Button(
+                AppButton(
+                    label = "Reset",
                     onClick = onReset,
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Primary),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Reset", fontWeight = FontWeight.Bold)
-                }
+                    variant = ButtonVariant.Secondary,
+                    icon = Icons.Default.Refresh
+                )
             }
         }
     }

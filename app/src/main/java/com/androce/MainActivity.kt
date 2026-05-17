@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
@@ -110,8 +111,14 @@ class MainActivity : ComponentActivity() {
 
     private val overlayPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) {
-        // Overlay permission result checked in SettingsScreen or next attempt
+    ) { result ->
+        // Check if permission was granted after returning from settings
+        if (canDrawOverlays()) {
+            // Permission granted, start the floating service if enabled
+            if (AppPrefs.floatingIconEnabled) {
+                startService(Intent(this, com.androce.core.FloatingIconService::class.java))
+            }
+        }
     }
 
     private val bottomTab = mutableIntStateOf(0) // 0 = Process, 1 = Scanner, 2 = Results, 3 = Speed, 4 = Settings
@@ -119,6 +126,7 @@ class MainActivity : ComponentActivity() {
     private val hasRoot = mutableStateOf(false)
     private val showRootError = mutableStateOf(false)
     private val showExitDialog = mutableStateOf(false)
+    private val showOverlayPermissionDialog = mutableStateOf(false)
 
     fun canDrawOverlays(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -207,8 +215,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Setup global exception handler
         com.androce.core.GlobalExceptionHandler.setup(this)
+
+        // Initialize AppPrefs early for permission checks
+        com.androce.core.AppPrefs.init(this)
+
+        // Request notification permission for Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        // Check and request overlay permission if floating icon is enabled but permission not granted
+        if (AppPrefs.floatingIconEnabled && !canDrawOverlays()) {
+            showOverlayPermissionDialog.value = true
         }
 
         // Auto-start floating icon if enabled and permission granted
@@ -321,49 +339,6 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     containerColor = Background,
                     snackbarHost = { SnackbarHost(snackbarHostState) },
-                    topBar = {
-                        @OptIn(ExperimentalMaterial3Api::class)
-                        TopAppBar(
-                            title = { },
-                            navigationIcon = {
-                                // Minimize button with background
-                                FilledTonalIconButton(
-                                    onClick = { moveTaskToBack(true) },
-                                    modifier = Modifier.padding(horizontal = 12.dp),
-                                    colors = IconButtonDefaults.filledTonalIconButtonColors(
-                                        containerColor = SurfaceColor,
-                                        contentColor = Primary
-                                    )
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Apps,
-                                        contentDescription = "Minimize",
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                            },
-                            actions = {
-                                // Exit button with red background
-                                FilledIconButton(
-                                    onClick = { showExitDialog.value = true },
-                                    modifier = Modifier.padding(horizontal = 12.dp),
-                                    colors = IconButtonDefaults.filledIconButtonColors(
-                                        containerColor = Error,
-                                        contentColor = Color.White
-                                    )
-                                ) {
-                                    Icon(
-                                        Icons.Default.PowerSettingsNew,
-                                        contentDescription = "Exit",
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                            },
-                            colors = TopAppBarDefaults.topAppBarColors(
-                                containerColor = Background
-                            )
-                        )
-                    },
                     bottomBar = {
                         Column(
                             modifier = Modifier
@@ -415,17 +390,22 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 ) { innerPadding ->
-                    Surface(
+                    Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(
-                                start = innerPadding.calculateLeftPadding(LocalLayoutDirection.current),
-                                end = innerPadding.calculateRightPadding(LocalLayoutDirection.current),
-                                bottom = innerPadding.calculateBottomPadding()
-                            ),
-                        color = Background
+                            .padding(bottom = innerPadding.calculateBottomPadding())
                     ) {
-                        when (selectedTab) {
+                        GlobalAppBar(
+                            onMinimize = { moveTaskToBack(true) },
+                            onExit = { showExitDialog.value = true }
+                        )
+                        Surface(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            color = Background
+                        ) {
+                            when (selectedTab) {
                             0 -> {
                                 val selectedProcess by scanVm.selectedProcess.collectAsState()
                                 ProcessListScreen(
@@ -453,6 +433,7 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                             4 -> SettingsScreen()
+                            }
                         }
                     }
                 }
@@ -477,7 +458,106 @@ class MainActivity : ComponentActivity() {
                     shape = RoundedCornerShape(16.dp)
                 )
             }
+
+            // Overlay permission dialog
+            if (showOverlayPermissionDialog.value) {
+                AlertDialog(
+                    onDismissRequest = { showOverlayPermissionDialog.value = false },
+                    title = { Text("Permission Required", color = OnBackground) },
+                    text = {
+                        Column {
+                            Text(
+                                "androCE needs permission to display over other apps for the floating icon feature.",
+                                color = OnBackground.copy(alpha = 0.8f),
+                                fontSize = 14.sp
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "The floating icon appears when you minimize the app, providing quick access while gaming.",
+                                color = OnSurface,
+                                fontSize = 13.sp
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "You can disable this feature anytime in Settings > General > Floating Icon.",
+                                color = OnSurface.copy(alpha = 0.7f),
+                                fontSize = 12.sp
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                showOverlayPermissionDialog.value = false
+                                requestOverlayPermission()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Primary)
+                        ) {
+                            Text("Grant Permission", color = Color.White)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                showOverlayPermissionDialog.value = false
+                                // Disable floating icon since user declined permission
+                                AppPrefs.floatingIconEnabled = false
+                            }
+                        ) {
+                            Text("Disable Feature", color = OnSurface)
+                        }
+                    },
+                    containerColor = SurfaceColor,
+                    shape = RoundedCornerShape(16.dp)
+                )
             }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GlobalAppBar(
+    onMinimize: () -> Unit,
+    onExit: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .height(44.dp)
+            .background(Background)
+            .padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        FilledTonalIconButton(
+            onClick = onMinimize,
+            modifier = Modifier.size(36.dp),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = SurfaceColor,
+                contentColor = Primary
+            )
+        ) {
+            Icon(
+                imageVector = Icons.Default.Apps,
+                contentDescription = "Minimize",
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        FilledIconButton(
+            onClick = onExit,
+            modifier = Modifier.size(36.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = Error,
+                contentColor = Color.White
+            )
+        ) {
+            Icon(
+                Icons.Default.PowerSettingsNew,
+                contentDescription = "Exit",
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }

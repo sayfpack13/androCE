@@ -78,12 +78,17 @@ import androidx.compose.ui.unit.sp
 import com.androce.core.ScanProgress
 import com.androce.model.ScanComparison
 import com.androce.model.ValueType
-import com.androce.ui.components.AttachedProcessBanner
-import com.androce.ui.components.NoProcessSelectedBanner
+import com.androce.ui.components.AppButton
+import com.androce.ui.components.AppChip
+import com.androce.ui.components.AppIconButton
+import com.androce.ui.components.AppTextField
+import com.androce.ui.components.ScreenScaffold
+import com.androce.ui.components.StatusBadge
 import com.androce.model.ValueTypeCategory
 import com.androce.ui.theme.Accent
 import com.androce.ui.theme.AccentGreen
 import com.androce.ui.theme.Background
+import com.androce.ui.theme.Error
 import com.androce.ui.theme.OnBackground
 import com.androce.ui.theme.OnSurface
 import com.androce.ui.theme.Primary
@@ -128,42 +133,21 @@ fun SearchScreen(
 
     val scansEnabled = selectedProcess != null
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Memory Search", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        Text(
-                            selectedProcess?.let { "${it.displayName()}  [PID ${it.pid}]" } ?: "No process selected",
-                            color = if (selectedProcess != null) Accent else Warning,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                },
-                actions = {
-                    if (results.isNotEmpty()) {
-                        Box(
-                            Modifier.clip(RoundedCornerShape(8.dp))
-                                .background(AccentGreen.copy(alpha = 0.2f))
-                                .padding(horizontal = 8.dp, vertical = 3.dp)
-                        ) {
-                            Text("${results.size} found", color = AccentGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)
-            )
-        },
-        containerColor = Background
-    ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            if (selectedProcess == null) {
-                NoProcessSelectedBanner(Modifier.padding(bottom = 12.dp))
-            } else {
-                AttachedProcessBanner(selectedProcess!!, Modifier.padding(bottom = 12.dp))
+    ScreenScaffold(
+        title = "Memory Search",
+        selectedProcess = selectedProcess,
+        showProcessContext = true,
+        containerColor = Background,
+        actions = {
+            if (results.isNotEmpty()) {
+                StatusBadge(
+                    text = "${results.size} results",
+                    isActive = true
+                )
             }
+        }
+    ) {
+        Column(Modifier.fillMaxSize()) {
             ScanTab(
                 scanState = scanState,
                 results = results,
@@ -246,8 +230,7 @@ private fun ScanTab(
     Column(
         Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // Type selection + summary
@@ -311,7 +294,7 @@ private fun ScanTab(
 
         // Comparison control row (only when we have previous results)
         if (results.isNotEmpty() && !isScanning) {
-            ComparisonControlRow(
+            ComparisonControlRowV2(
                 selectedType = selectedType,
                 searchInput = searchInput,
                 rangeMin = rangeMin,
@@ -547,7 +530,7 @@ private fun ValueTypeDropdown(selected: ValueType, onSelect: (ValueType) -> Unit
 }
 
 @Composable
-private fun ComparisonControlRow(
+private fun ComparisonControlRowV2(
     selectedType: ValueType,
     searchInput: String,
     rangeMin: String,
@@ -565,20 +548,17 @@ private fun ComparisonControlRow(
         SectionLabel("Compare against previous")
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             items(ScanComparison.withoutValue.size) { i ->
-                val isSel = selectedOp == ScanComparison.withoutValue[i]
-                Box(
-                    Modifier.clip(RoundedCornerShape(18.dp))
-                        .background(if (isSel) Primary.copy(alpha = 0.2f) else SurfaceVariant)
-                        .border(1.dp, if (isSel) Primary else SurfaceHigh, RoundedCornerShape(18.dp))
-                        .clickable(enabled = scansEnabled) {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            selectedOp = ScanComparison.withoutValue[i]
-                            onComparison(ScanComparison.withoutValue[i])
-                        }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Text(ScanComparison.withoutValue[i].symbol, color = if (isSel) Primary else OnSurface, fontSize = 13.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
-                }
+                val op = ScanComparison.withoutValue[i]
+                val isSel = selectedOp == op
+                AppChip(
+                    label = op.symbol,
+                    selected = isSel,
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        selectedOp = op
+                        onComparison(op)
+                    }
+                )
             }
         }
         // Value-require ops: EXACT, INCREASED_BY, DECREASED_BY, BETWEEN
@@ -588,35 +568,27 @@ private fun ComparisonControlRow(
                 val op = valueOps[i]
                 val isSel = selectedOp == op
                 val enabled = scansEnabled && when (op) {
-                    ScanComparison.BETWEEN -> true // BETWEEN uses range inputs
-                    else -> hasValue // EXACT / INCREASED_BY / DECREASED_BY need searchInput
+                    ScanComparison.BETWEEN -> true
+                    else -> hasValue
                 }
-                val alpha = if (enabled) 1f else 0.4f
-                Box(
-                    Modifier.clip(RoundedCornerShape(18.dp))
-                        .background(if (isSel) Accent.copy(alpha = 0.2f) else SurfaceVariant)
-                        .border(1.dp, if (isSel) Accent else SurfaceHigh, RoundedCornerShape(18.dp))
-                        .clickable(enabled = enabled) {
+                val label = if ((op == ScanComparison.INCREASED_BY || op == ScanComparison.DECREASED_BY) && hasValue) {
+                    "${op.label} (Δ $searchInput)"
+                } else {
+                    op.label
+                }
+                AppChip(
+                    label = label,
+                    selected = isSel,
+                    onClick = {
+                        if (enabled) {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             selectedOp = op
                             if (op != ScanComparison.BETWEEN) {
                                 onComparison(op)
                             }
                         }
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(op.label, color = if (isSel) Accent.copy(alpha = alpha) else OnSurface.copy(alpha = alpha), fontSize = 11.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium)
-                        if (op == ScanComparison.INCREASED_BY || op == ScanComparison.DECREASED_BY) {
-                            Text(
-                                if (hasValue) "Δ $searchInput" else "needs Δ",
-                                color = if (hasValue) AccentGreen.copy(alpha = alpha) else Warning.copy(alpha = alpha),
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
                     }
-                }
+                )
             }
         }
         // Range inputs for BETWEEN

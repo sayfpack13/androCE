@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -85,8 +87,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.androce.model.ProcessInfo
 import com.androce.model.ScanResult
-import com.androce.ui.components.NoProcessSelectedBanner
+import com.androce.ui.components.AppDimensions
+import com.androce.ui.components.ProcessTopBarSubtitle
+import com.androce.ui.components.StatusBadge
+import com.androce.ui.components.TabScreenBody
 import com.androce.ui.theme.Accent
 import com.androce.core.AppPrefs
 import com.androce.ui.theme.AccentGreen
@@ -101,7 +107,7 @@ import com.androce.viewmodel.ScanViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ResultsScreen(
     viewModel: ScanViewModel,
@@ -152,113 +158,8 @@ fun ResultsScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0),
         snackbarHost = { SnackbarHost(snackBarHostState) },
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Results", color = Primary, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                        val subtitle = when {
-                            selectedProcess == null -> "No process selected"
-                            selectedCount > 0 -> "$selectedCount of ${results.size} selected · PID ${selectedProcess!!.pid}"
-                            else -> "${results.size} address${if (results.size != 1) "es" else ""} · PID ${selectedProcess!!.pid}"
-                        }
-                        Text(
-                            subtitle,
-                            color = if (selectedProcess != null) Accent else Warning,
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                },
-                navigationIcon = {
-                    if (onBack != null) {
-                        IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Primary)
-                        }
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.selectAll(!allSelected) }) {
-                        Icon(
-                            if (allSelected) Icons.Default.Clear else Icons.Default.SelectAll,
-                            contentDescription = if (allSelected) "Deselect all" else "Select all",
-                            tint = Primary
-                        )
-                    }
-                    Box {
-                        IconButton(onClick = { showMenu = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Menu", tint = Primary)
-                        }
-                        DropdownMenu(
-                            expanded = showMenu,
-                            onDismissRequest = { showMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Save All") },
-                                leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
-                                onClick = {
-                                    showMenu = false
-                                    saveName = ""
-                                    saveSelectedOnly = false
-                                    showSaveDialog = true
-                                }
-                            )
-                            if (selectedCount > 0) {
-                                DropdownMenuItem(
-                                    text = { Text("Save Selected ($selectedCount)") },
-                                    leadingIcon = { Icon(Icons.Default.Save, contentDescription = null, tint = Accent) },
-                                    onClick = {
-                                        showMenu = false
-                                        saveName = ""
-                                        saveSelectedOnly = true
-                                        showSaveDialog = true
-                                    }
-                                )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Saved Lists") },
-                                leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Accent) },
-                                onClick = {
-                                    showMenu = false
-                                    showSavedTables = true
-                                }
-                            )
-                            if (selectedCount > 0) {
-                                DropdownMenuItem(
-                                    text = { Text("Freeze Selected ($selectedCount)") },
-                                    leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = Accent) },
-                                    onClick = {
-                                        showMenu = false
-                                        viewModel.bulkFreezeSelected(true)
-                                        scope.launch { snackBarHostState.showSnackbar("Froze $selectedCount addresses") }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Unfreeze Selected ($selectedCount)") },
-                                    leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)) },
-                                    onClick = {
-                                        showMenu = false
-                                        viewModel.bulkFreezeSelected(false)
-                                        scope.launch { snackBarHostState.showSnackbar("Unfroze $selectedCount addresses") }
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Delete Selected ($selectedCount)") },
-                                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                                    onClick = {
-                                        showMenu = false
-                                        viewModel.removeSelected()
-                                        scope.launch { snackBarHostState.showSnackbar("Deleted $selectedCount addresses") }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)
-            )
-        },
         floatingActionButton = {
             AnimatedVisibility(
                 visible = selectedCount > 0,
@@ -279,19 +180,40 @@ fun ResultsScreen(
                 )
             }
         },
-        containerColor = MaterialTheme.colorScheme.background
+        containerColor = Background,
+        topBar = {
+            TopAppBar(
+                modifier = Modifier.heightIn(max = 52.dp),
+                windowInsets = WindowInsets(0),
+                title = {
+                    Column {
+                        Text(
+                            "Results",
+                            color = Primary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp
+                        )
+                        ProcessTopBarSubtitle(selectedProcess)
+                    }
+                },
+                actions = {
+                    if (results.isNotEmpty()) {
+                        StatusBadge(
+                            text = "${results.size} results",
+                            isActive = true
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)
+            )
+        }
     ) { padding ->
         if (results.isEmpty()) {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                if (selectedProcess == null) {
-                    NoProcessSelectedBanner()
-                }
+            TabScreenBody(padding = padding) {
+                Column(
+                    Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -322,15 +244,19 @@ fun ResultsScreen(
                         )
                     }
                 }
+                }
             }
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                contentPadding = PaddingValues(
+                    horizontal = AppDimensions.paddingXLarge,
+                    vertical = 2.dp
+                ),
                 verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 items(
-                    items = results, 
+                    items = results,
                     key = { it.address }
                 ) { result ->
                     ResultRow(
@@ -680,6 +606,139 @@ private fun ResultRow(
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold
                         )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ResultsHeader(
+    resultsCount: Int,
+    selectedCount: Int,
+    selectedProcess: ProcessInfo?,
+    allSelected: Boolean,
+    onSelectAll: () -> Unit,
+    showMenu: Boolean,
+    onShowMenuChange: (Boolean) -> Unit,
+    onSaveAll: () -> Unit,
+    onSaveSelected: () -> Unit,
+    onShowSaved: () -> Unit,
+    onFreezeSelected: () -> Unit,
+    onUnfreezeSelected: () -> Unit,
+    onDeleteSelected: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Background)
+            .padding(horizontal = 4.dp, vertical = 4.dp)
+    ) {
+        // Title row
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "Results",
+                    color = Primary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+                val subtitle = when {
+                    selectedProcess == null -> "No process selected"
+                    selectedCount > 0 -> "$selectedCount of $resultsCount selected · PID ${selectedProcess.pid}"
+                    else -> "$resultsCount address${if (resultsCount != 1) "es" else ""} · PID ${selectedProcess.pid}"
+                }
+                Text(
+                    subtitle,
+                    color = if (selectedProcess != null) Accent else Warning,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+
+            // Action buttons
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onSelectAll) {
+                    Icon(
+                        if (allSelected) Icons.Default.Clear else Icons.Default.SelectAll,
+                        contentDescription = if (allSelected) "Deselect all" else "Select all",
+                        tint = Primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                Box {
+                    IconButton(onClick = { onShowMenuChange(true) }) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            contentDescription = "Menu",
+                            tint = Primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = showMenu,
+                        onDismissRequest = { onShowMenuChange(false) }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Save All") },
+                            leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
+                            onClick = {
+                                onShowMenuChange(false)
+                                onSaveAll()
+                            }
+                        )
+                        if (selectedCount > 0) {
+                            DropdownMenuItem(
+                                text = { Text("Save Selected ($selectedCount)") },
+                                leadingIcon = { Icon(Icons.Default.Save, contentDescription = null, tint = Accent) },
+                                onClick = {
+                                    onShowMenuChange(false)
+                                    onSaveSelected()
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Saved Lists") },
+                            leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Accent) },
+                            onClick = {
+                                onShowMenuChange(false)
+                                onShowSaved()
+                            }
+                        )
+                        if (selectedCount > 0) {
+                            DropdownMenuItem(
+                                text = { Text("Freeze Selected ($selectedCount)") },
+                                leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = Accent) },
+                                onClick = {
+                                    onShowMenuChange(false)
+                                    onFreezeSelected()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Unfreeze Selected ($selectedCount)") },
+                                leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)) },
+                                onClick = {
+                                    onShowMenuChange(false)
+                                    onUnfreezeSelected()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete Selected ($selectedCount)") },
+                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    onShowMenuChange(false)
+                                    onDeleteSelected()
+                                }
+                            )
+                        }
                     }
                 }
             }
