@@ -42,6 +42,8 @@ sealed class ScanState {
     data class Error(val message: String) : ScanState()
 }
 
+data class CheatTableMeta(val processName: String, val savedAt: Long, val entryCount: Int)
+
 class ScanViewModel : ViewModel() {
 
     private var _selectedProcess: ProcessInfo? = null
@@ -843,10 +845,15 @@ class ScanViewModel : ViewModel() {
         ?.map { it.nameWithoutExtension }?.sorted() ?: emptyList()
 
     fun saveCheatTable(name: String): Boolean {
+        return saveCheatTable(name, _results.value.map { it.address })
+    }
+
+    fun saveCheatTable(name: String, addresses: List<Long>): Boolean {
         return try {
             val safe = name.ifBlank { "table_${System.currentTimeMillis()}" }
                 .replace(Regex("[^A-Za-z0-9_-]"), "_")
-            val entries = _results.value.map { r ->
+            val addressSet = addresses.toSet()
+            val entries = _results.value.filter { it.address in addressSet }.map { r ->
                 CheatTableEntry(
                     address = r.address,
                     label = "",
@@ -906,4 +913,30 @@ class ScanViewModel : ViewModel() {
 
     fun deleteCheatTable(name: String): Boolean =
         File(tablesDir(), "$name.json").delete()
+
+    fun getCheatTableInfo(name: String): CheatTableMeta? {
+        return try {
+            val file = File(tablesDir(), "$name.json")
+            if (!file.exists()) return null
+            val json = org.json.JSONObject(file.readText())
+            CheatTableMeta(
+                processName = json.optString("processName", "unknown"),
+                savedAt = json.optLong("savedAt", 0),
+                entryCount = json.optJSONArray("entries")?.length() ?: 0
+            )
+        } catch (e: Exception) { null }
+    }
+
+    fun renameCheatTable(oldName: String, newName: String): Boolean {
+        val safeNew = newName.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        if (safeNew.isBlank()) return false
+        return try {
+            val oldFile = File(tablesDir(), "$oldName.json")
+            val newFile = File(tablesDir(), "$safeNew.json")
+            if (!oldFile.exists() || newFile.exists()) return false
+            oldFile.renameTo(newFile)
+        } catch (e: Exception) {
+            AppLogger.e("ScanViewModel", "renameCheatTable failed", e); false
+        }
+    }
 }

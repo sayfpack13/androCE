@@ -117,7 +117,9 @@ fun ResultsScreen(
     var showMenu by remember { mutableStateOf(false) }
     var showSaveDialog by rememberSaveable { mutableStateOf(false) }
     var saveName by rememberSaveable { mutableStateOf("") }
+    var saveSelectedOnly by rememberSaveable { mutableStateOf(false) }
     var showLoadDialog by rememberSaveable { mutableStateOf(false) }
+    var showSavedTables by rememberSaveable { mutableStateOf(false) }
     var tableNames by remember { mutableStateOf(viewModel.listSavedTables()) }
     // Auto-refresh timer: always enabled when results exist and no scan is running
     val isScanning = scanState is ScanState.Scanning
@@ -164,21 +166,33 @@ fun ResultsScreen(
                             onDismissRequest = { showMenu = false }
                         ) {
                             DropdownMenuItem(
-                                text = { Text("Save Table") },
+                                text = { Text("Save All") },
                                 leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
                                 onClick = {
                                     showMenu = false
                                     saveName = ""
+                                    saveSelectedOnly = false
                                     showSaveDialog = true
                                 }
                             )
+                            if (selectedCount > 0) {
+                                DropdownMenuItem(
+                                    text = { Text("Save Selected ($selectedCount)") },
+                                    leadingIcon = { Icon(Icons.Default.Save, contentDescription = null, tint = Accent) },
+                                    onClick = {
+                                        showMenu = false
+                                        saveName = ""
+                                        saveSelectedOnly = true
+                                        showSaveDialog = true
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
-                                text = { Text("Load Table") },
-                                leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
+                                text = { Text("Saved Lists") },
+                                leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Accent) },
                                 onClick = {
                                     showMenu = false
-                                    tableNames = viewModel.listSavedTables()
-                                    showLoadDialog = true
+                                    showSavedTables = true
                                 }
                             )
                             if (selectedCount > 0) {
@@ -223,7 +237,13 @@ fun ResultsScreen(
                 exit = scaleOut(tween(150)) + fadeOut(tween(150))
             ) {
                 ExtendedFloatingActionButton(
-                    onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); showBulkWriteDialog = true },
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val selected = results.filter { it.selected }
+                        val values = selected.map { it.displayValue() }.distinct()
+                        bulkWriteValue = if (values.size == 1) values.first() else ""
+                        showBulkWriteDialog = true
+                    },
                     containerColor = Primary,
                     icon = { Icon(Icons.Default.Edit, contentDescription = null) },
                     text = { Text("Write ($selectedCount)") }
@@ -323,12 +343,13 @@ fun ResultsScreen(
     }
 
     if (showSaveDialog) {
+        val saveCount = if (saveSelectedOnly) selectedCount else results.size
         AlertDialog(
             onDismissRequest = { showSaveDialog = false },
             containerColor = MaterialTheme.colorScheme.surface,
             title = {
                 Text(
-                    "Save Cheat Table",
+                    if (saveSelectedOnly) "Save Selected Addresses" else "Save All Addresses",
                     color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold
                 )
             },
@@ -342,7 +363,7 @@ fun ResultsScreen(
                         colors = inputColors()
                     )
                     Text(
-                        "Saving ${results.size} address${if (results.size != 1) "es" else ""}",
+                        "Saving $saveCount address${if (saveCount != 1) "es" else ""}",
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp
                     )
                 }
@@ -350,7 +371,12 @@ fun ResultsScreen(
             confirmButton = {
                 TextButton(onClick = {
                     if (saveName.isNotBlank()) {
-                        if (viewModel.saveCheatTable(saveName)) {
+                        val success = if (saveSelectedOnly) {
+                            viewModel.saveCheatTable(saveName, selectedAddresses)
+                        } else {
+                            viewModel.saveCheatTable(saveName)
+                        }
+                        if (success) {
                             scope.launch { snackBarHostState.showSnackbar("Table saved") }
                         } else {
                             scope.launch { snackBarHostState.showSnackbar("Failed to save table") }
@@ -402,6 +428,13 @@ fun ResultsScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { showLoadDialog = false }) { Text("Close", color = Primary) } }
+        )
+    }
+
+    if (showSavedTables) {
+        SavedTablesScreen(
+            viewModel = viewModel,
+            onBack = { showSavedTables = false }
         )
     }
 }

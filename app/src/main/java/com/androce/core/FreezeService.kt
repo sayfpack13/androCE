@@ -16,8 +16,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import com.topjohnwu.superuser.Shell
-
 class FreezeService : Service() {
 
     inner class FreezeServiceBinder : Binder() {
@@ -29,6 +27,10 @@ class FreezeService : Service() {
     private var freezeJob: Job? = null
 
     private val frozenEntries = mutableMapOf<Long, FrozenEntry>()
+
+    /** Persistent root shell — opened once, reused for all freeze writes */
+    private var persistentShell: Process? = null
+    private var persistentShellWriter: java.io.PrintWriter? = null
 
     data class FrozenEntry(val pid: Int, val address: Long, val bytes: ByteArray)
 
@@ -78,6 +80,29 @@ class FreezeService : Service() {
 
     fun getFrozenCount(): Int = synchronized(frozenEntries) { frozenEntries.size }
 
+    /** Open or reopen a persistent `su` shell for instant command execution */
+    private fun ensurePersistentShell(): java.io.PrintWriter? {
+        val proc = persistentShell
+        if (proc != null && proc.isAlive) {
+            persistentShellWriter?.let { return it }
+        }
+        closePersistentShell()
+        return try {
+            val newProc = Runtime.getRuntime().exec(arrayOf("su", "-c", "sh"))
+            persistentShell = newProc
+            val writer = java.io.PrintWriter(newProc.outputStream, true)
+            persistentShellWriter = writer
+            writer
+        } catch (_: Exception) { null }
+    }
+
+    private fun closePersistentShell() {
+        try { persistentShellWriter?.close() } catch (_: Exception) {}
+        try { persistentShell?.destroy() } catch (_: Exception) {}
+        persistentShellWriter = null
+        persistentShell = null
+    }
+
     private fun startFreezeLoop() {
         freezeJob?.cancel()
         freezeJob = scope.launch {
@@ -85,21 +110,19 @@ class FreezeService : Service() {
                 val snapshot: List<FrozenEntry> = synchronized(frozenEntries) {
                     frozenEntries.values.toList()
                 }
+                if (snapshot.isEmpty()) { delay(50); continue }
+
+                val writer = ensurePersistentShell() ?: break
                 val nativePath = MemoryReader.nativeHelper
                 snapshot.groupBy { it.pid }.forEach { (pid, entries) ->
                     if (nativePath.isNotEmpty()) {
-                        // Use Runtime.exec via su — bypasses libsu's serialized shell
                         val args = entries.joinToString(" ") { e ->
                             "${e.address}:${e.bytes.joinToString("") { "%02x".format(it) }}"
                         }
-                        try {
-                            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "$nativePath write $pid $args"))
-                            proc.waitFor()
-                        } catch (_: Exception) {}
-                    } else {
-                        Shell.cmd("true").exec() // no-op if native helper unavailable
+                        writer.println("$nativePath write $pid $args >/dev/null 2>&1")
                     }
                 }
+                writer.flush()
                 delay(AppPrefs.freezeIntervalMs)
             }
         }
@@ -108,6 +131,7 @@ class FreezeService : Service() {
     private fun stopFreezeLoop() {
         freezeJob?.cancel()
         freezeJob = null
+        closePersistentShell()
     }
 
     private fun showForegroundNotification() {
@@ -136,6 +160,7 @@ class FreezeService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         scope.coroutineContext[Job]?.cancel()
+        closePersistentShell()
     }
 
     companion object {

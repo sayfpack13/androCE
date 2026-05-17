@@ -28,17 +28,20 @@ object MemoryReader {
         else -> pythonAvailable  // "auto" — prefer Python if available
     }
 
-    fun init(context: Context) {
+    suspend fun init(context: Context) = withContext(Dispatchers.IO) {
         var dest = File(context.filesDir, "memscan")
-        try {
-            context.assets.open("memscan").use { input ->
-                dest.outputStream().use { output ->
-                    input.copyTo(output)
+        val needsExtract = !dest.exists()
+        if (needsExtract) {
+            try {
+                context.assets.open("memscan").use { input ->
+                    dest.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
                 }
+                Shell.cmd("chmod 755 ${dest.absolutePath}").exec()
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to extract native helper", e)
             }
-            Shell.cmd("chmod 755 ${dest.absolutePath}").exec()
-        } catch (e: Exception) {
-            AppLogger.e(TAG, "Failed to extract native helper", e)
         }
 
         // Test if binary works from app files dir; if not, try /data/local/tmp
@@ -46,22 +49,24 @@ object MemoryReader {
         val works = testRes.out.any { it.trim().startsWith("# start") }
         if (!works) {
             val tmpDest = File("/data/local/tmp/androce_memscan")
-            try {
-                context.assets.open("memscan").use { input ->
-                    tmpDest.outputStream().use { output ->
-                        input.copyTo(output)
+            if (!tmpDest.exists()) {
+                try {
+                    context.assets.open("memscan").use { input ->
+                        tmpDest.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
                     }
+                    Shell.cmd("chmod 755 ${tmpDest.absolutePath}").exec()
+                } catch (e: Exception) {
+                    AppLogger.e(TAG, "Failed to extract native helper to tmp", e)
                 }
-                Shell.cmd("chmod 755 ${tmpDest.absolutePath}").exec()
-                val tmpTest = Shell.cmd("\"${tmpDest.absolutePath}\" read 1 0 1 2>/dev/null || echo FAIL").exec()
-                if (tmpTest.out.any { it.trim().startsWith("# start") }) {
-                    dest = tmpDest
-                    AppLogger.d(TAG, "Using tmp native helper: ${dest.absolutePath}")
-                } else {
-                    AppLogger.e(TAG, "Native helper does not execute from files dir or tmp")
-                }
-            } catch (e: Exception) {
-                AppLogger.e(TAG, "Failed to extract native helper to tmp", e)
+            }
+            val tmpTest = Shell.cmd("\"${tmpDest.absolutePath}\" read 1 0 1 2>/dev/null || echo FAIL").exec()
+            if (tmpTest.out.any { it.trim().startsWith("# start") }) {
+                dest = tmpDest
+                AppLogger.d(TAG, "Using tmp native helper: ${dest.absolutePath}")
+            } else {
+                AppLogger.e(TAG, "Native helper does not execute from files dir or tmp")
             }
         }
         nativeHelperPath = dest.absolutePath
@@ -80,7 +85,7 @@ object MemoryReader {
             }
         }
 
-        // If not found, try Termux Python via nsenter (PID 1 mount namespace)
+        // Try Termux Python via nsenter
         if (!pythonAvailable) {
             val termuxPrefix = "/data/data/com.termux/files/usr"
             val pyCmd = "nsenter -t 1 -m -- /system/bin/env LD_LIBRARY_PATH=$termuxPrefix/lib PYTHONHOME=$termuxPrefix $termuxPrefix/bin/python3"

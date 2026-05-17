@@ -3,7 +3,6 @@ package com.androce
 import android.app.Application
 import com.androce.core.AppLogger
 import com.androce.core.AppPrefs
-import com.androce.core.MemoryReader
 import com.topjohnwu.superuser.Shell
 
 class AndroCEApp : Application() {
@@ -17,6 +16,5 @@ class AndroCEApp : Application() {
             Shell.Builder.create()
                 .setTimeout(30)
         )
-        MemoryReader.init(this)
     }
 }
