@@ -87,6 +87,20 @@ object MemoryReader {
     suspend fun detectPython() = withContext(Dispatchers.IO) {
         pythonAvailable = false
 
+        // Root-mirrored Termux Python (/data/local/tmp — executable by root shell)
+        val rootMirror = "/data/local/tmp/androce/usr"
+        for (name in listOf("python3", "python", "python3.12", "python3.11")) {
+            val pyPath = "$rootMirror/bin/$name"
+            val cmd = "LD_LIBRARY_PATH=$rootMirror/lib PYTHONHOME=$rootMirror $pyPath"
+            val check = Shell.cmd("[ -f $pyPath ] && $cmd --version 2>&1").exec()
+            if (check.out.any { it.trim().startsWith("Python") }) {
+                pythonBinary = cmd
+                pythonAvailable = true
+                AppLogger.d(TAG, "Root-mirror Python at $pyPath")
+                return@withContext
+            }
+        }
+
         // Check system PATH first
         for (py in listOf("python3", "python")) {
             val check = Shell.cmd("$py --version 2>&1").exec()
@@ -119,7 +133,6 @@ object MemoryReader {
 
         // Check for Python in common system locations
         val commonPaths = listOf(
-            "/data/data/com.termux/files/usr/bin/python3",
             "/data/adb/modules/python/bin/python3",
             "/data/adb/python/bin/python3",
             "/data/local/tmp/python/bin/python3",
@@ -136,58 +149,25 @@ object MemoryReader {
             }
         }
 
-        // Try Termux Python with various Python versions
-        val termuxPrefix = "/data/data/com.termux/files/usr"
-        val termuxPythonVersions = listOf("3.12", "3.11", "3.10", "3.9", "3.8")
+        // Termux: scan all prefix paths (data/data and data/user/0)
+        val termuxPrefixes = Shell.cmd(
+            "ls -d /data/data/com.termux/files/usr /data/user/*/com.termux/files/usr 2>/dev/null"
+        ).exec().out.map { it.trim() }.filter { it.endsWith("/usr") }
+            .ifEmpty { listOf("/data/data/com.termux/files/usr") }
 
-        for (version in termuxPythonVersions) {
-            val pyPath = "$termuxPrefix/bin/python$version"
-            val check = Shell.cmd("[ -f $pyPath ] && $pyPath --version 2>&1").exec()
-            if (check.out.any { it.trim().startsWith("Python") }) {
-                // Build environment-aware command
-                val dynloadPath = "$termuxPrefix/lib/python$version/lib-dynload"
-                val sitePackages = "$termuxPrefix/lib/python$version/site-packages"
-                val pyCmd = "LD_LIBRARY_PATH=$termuxPrefix/lib:$dynloadPath PYTHONHOME=$termuxPrefix PYTHONPATH=$sitePackages $pyPath"
-                pythonBinary = pyCmd
-                pythonAvailable = true
-                AppLogger.d(TAG, "Termux Python $version found")
-                return@withContext
-            }
-        }
-
-        // Try generic python3 in Termux
-        val termuxCheck = Shell.cmd("[ -f $termuxPrefix/bin/python3 ] && echo EXISTS").exec()
-        if (termuxCheck.out.any { it.contains("EXISTS") }) {
-            // Detect Python version in Termux
-            val versionCheck = Shell.cmd("$termuxPrefix/bin/python3 --version 2>&1").exec()
-            val version = versionCheck.out.firstOrNull()?.trim() ?: ""
-            AppLogger.d(TAG, "Termux python3 version: $version")
-
-            // Extract version number (e.g., "Python 3.11.4" -> "3.11")
-            val versionMatch = Regex("Python (\\d+\\.\\d+)").find(version)
-            val shortVersion = versionMatch?.groupValues?.getOrNull(1) ?: "3.11"
-
-            val dynloadPath = "$termuxPrefix/lib/python$shortVersion/lib-dynload"
-            val sitePackages = "$termuxPrefix/lib/python$shortVersion/site-packages"
-
-            // Try simple env approach first
-            val simpleCmd = "LD_LIBRARY_PATH=$termuxPrefix/lib $termuxPrefix/bin/python3"
-            val simpleCheck = Shell.cmd("$simpleCmd --version 2>&1").exec()
-            if (simpleCheck.out.any { it.trim().startsWith("Python") }) {
-                pythonBinary = simpleCmd
-                pythonAvailable = true
-                AppLogger.d(TAG, "Termux Python found (simple env)")
-                return@withContext
-            }
-
-            // Try full env approach
-            val fullCmd = "LD_LIBRARY_PATH=$termuxPrefix/lib:$dynloadPath PYTHONHOME=$termuxPrefix PYTHONPATH=$sitePackages $termuxPrefix/bin/python3"
-            val fullCheck = Shell.cmd("$fullCmd --version 2>&1").exec()
-            if (fullCheck.out.any { it.trim().startsWith("Python") }) {
-                pythonBinary = fullCmd
-                pythonAvailable = true
-                AppLogger.d(TAG, "Termux Python found (full env)")
-                return@withContext
+        for (termuxPrefix in termuxPrefixes) {
+            val names = listOf("python3", "python") +
+                listOf("3.12", "3.11", "3.10", "3.9", "3.8").map { "python$it" }
+            for (name in names) {
+                val pyPath = "$termuxPrefix/bin/$name"
+                val simpleCmd = "LD_LIBRARY_PATH=$termuxPrefix/lib PYTHONHOME=$termuxPrefix $pyPath"
+                val check = Shell.cmd("[ -f $pyPath ] && $simpleCmd --version 2>&1").exec()
+                if (check.out.any { it.trim().startsWith("Python") }) {
+                    pythonBinary = simpleCmd
+                    pythonAvailable = true
+                    AppLogger.d(TAG, "Termux Python found at $pyPath")
+                    return@withContext
+                }
             }
         }
 
@@ -216,6 +196,13 @@ object MemoryReader {
      */
     suspend fun refreshPythonStatus() {
         detectPython()
+    }
+
+    /** Set Python command after DependencyInstaller finds Termux Python. */
+    fun configurePython(command: String) {
+        pythonBinary = command
+        pythonAvailable = true
+        AppLogger.d(TAG, "Python configured: $command")
     }
 
     /**

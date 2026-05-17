@@ -182,6 +182,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun hideFloatingIcon() {
+        if (!AppPrefs.floatingIconEnabled) return
         val intent = Intent(this, com.androce.core.FloatingIconService::class.java).apply {
             action = com.androce.core.FloatingIconService.ACTION_HIDE
         }
@@ -189,6 +190,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showFloatingIcon() {
+        if (!AppPrefs.floatingIconEnabled || !canDrawOverlays()) return
         val intent = Intent(this, com.androce.core.FloatingIconService::class.java).apply {
             action = com.androce.core.FloatingIconService.ACTION_SHOW
         }
@@ -197,8 +199,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Hide floating icon when app is in foreground
-        if (AppPrefs.floatingIconEnabled) {
+        // Hide floating icon when app is in foreground (only if overlay permission granted)
+        if (AppPrefs.floatingIconEnabled && canDrawOverlays()) {
             hideFloatingIcon()
         }
     }
@@ -206,8 +208,8 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         // Don't pause scan when app goes to background - scan continues
-        // Show floating icon when app goes to background
-        if (AppPrefs.floatingIconEnabled) {
+        // Show floating icon when app goes to background (requires overlay permission)
+        if (AppPrefs.floatingIconEnabled && canDrawOverlays()) {
             showFloatingIcon()
         }
     }

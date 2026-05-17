@@ -987,6 +987,10 @@ private fun PythonInstallDialog(
     var installing by remember { mutableStateOf(false) }
     var installLog by remember { mutableStateOf("") }
     var lastResult by remember { mutableStateOf<DependencyInstaller.InstallResult?>(null) }
+    var elapsedSec by remember { mutableIntStateOf(0) }
+    var autoStarted by remember { mutableStateOf(false) }
+    val logScroll = rememberScrollState()
+    val bodyScroll = rememberScrollState()
 
     fun appendLog(line: String) {
         installLog = if (installLog.isEmpty()) line else "$installLog\n$line"
@@ -997,6 +1001,7 @@ private fun PythonInstallDialog(
         installing = true
         lastResult = null
         installLog = ""
+        elapsedSec = 0
         scope.launch {
             val result = DependencyInstaller.runPythonSetup { appendLog(it) }
             installing = false
@@ -1008,6 +1013,27 @@ private fun PythonInstallDialog(
                 if (result.success) "Python ready" else "Setup needs attention",
                 Toast.LENGTH_SHORT
             ).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!autoStarted) {
+            autoStarted = true
+            runSetup()
+        }
+    }
+
+    LaunchedEffect(installLog) {
+        if (installLog.isNotEmpty()) {
+            logScroll.scrollTo(logScroll.maxValue)
+        }
+    }
+
+    LaunchedEffect(installing) {
+        if (!installing) return@LaunchedEffect
+        while (installing) {
+            delay(1000)
+            elapsedSec++
         }
     }
 
@@ -1029,10 +1055,10 @@ private fun PythonInstallDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(bodyScroll)
             ) {
                 Text(
-                    "Python improves scan accuracy on zRAM / MemFusion devices. One tap bootstraps Termux if needed, installs Python, and verifies it — fully automatic.",
+                    "Python improves scan accuracy on zRAM / MemFusion devices. Setup runs entirely in the background (Termux is not opened), then installs and verifies Python.",
                     color = OnSurface,
                     fontSize = 13.sp,
                     lineHeight = 18.sp
@@ -1052,7 +1078,11 @@ private fun PythonInstallDialog(
                             strokeWidth = 2.dp
                         )
                         Spacer(Modifier.width(10.dp))
-                        Text("Setting up...", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (elapsedSec > 0) "Setting up... (${elapsedSec}s)" else "Setting up...",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
                     } else {
                         Text(
                             if (lastResult?.success == true) "Re-check Python" else "Setup Python",
@@ -1071,7 +1101,7 @@ private fun PythonInstallDialog(
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = installLog.ifEmpty { "Tap Setup Python to begin." },
+                    text = installLog.ifEmpty { "Starting setup..." },
                     color = if (lastResult?.success == true) AccentGreen else OnSurface,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -1079,7 +1109,7 @@ private fun PythonInstallDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 80.dp, max = 200.dp)
-                        .verticalScroll(rememberScrollState())
+                        .verticalScroll(logScroll)
                         .clip(RoundedCornerShape(6.dp))
                         .background(SurfaceVariant.copy(alpha = 0.5f))
                         .padding(8.dp)
@@ -1091,8 +1121,8 @@ private fun PythonInstallDialog(
                         Text(
                             "If setup fails:\n" +
                             "1. Install Termux from F-Droid (com.termux)\n" +
-                            "2. Grant root and allow internet\n" +
-                            "3. Tap Setup Python again",
+                            "2. Grant root and allow internet (bootstrap downloads in background)\n" +
+                            "3. Tap Setup Python again — Termux app does not need to be opened",
                             color = OnBackground.copy(alpha = 0.8f),
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,

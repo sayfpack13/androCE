@@ -9,7 +9,9 @@ import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.util.TypedValue
+import com.androce.core.AppLogger
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -23,6 +25,8 @@ import kotlin.math.roundToInt
 
 class FloatingIconService : Service() {
 
+    private val tag = "FloatingIconService"
+
     private var windowManager: WindowManager? = null
     private var floatingView: View? = null
     private var params: WindowManager.LayoutParams? = null
@@ -32,7 +36,7 @@ class FloatingIconService : Service() {
     private var touchDownX = 0f
     private var touchDownY = 0f
     private var isDragging = false
-    private var isVisible = true
+    private var isAttached = false
 
     override fun onCreate() {
         super.onCreate()
@@ -53,17 +57,22 @@ class FloatingIconService : Service() {
                 return START_STICKY
             }
             ACTION_SHOW -> {
-                showFloatingIcon()
-                return START_STICKY
+                if (!showFloatingIcon()) stopSelf()
+                return START_NOT_STICKY
             }
             else -> {
                 if (floatingView != null) {
                     // Already running
                     return START_STICKY
                 }
+                if (!canDrawOverlays()) {
+                    AppLogger.w(tag, "Overlay permission missing — not starting floating icon")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 startForeground(NOTIFICATION_ID, buildNotification())
-                showFloatingIcon()
-                return START_STICKY
+                if (!showFloatingIcon()) stopSelf()
+                return START_NOT_STICKY
             }
         }
     }
@@ -75,7 +84,11 @@ class FloatingIconService : Service() {
         super.onDestroy()
     }
 
-    private fun createFloatingIconView() {
+    private fun canDrawOverlays(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
+
+    private fun createFloatingIconView(): Boolean {
+        if (!canDrawOverlays()) return false
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         val sizePx = TypedValue.applyDimension(
@@ -173,39 +186,45 @@ class FloatingIconService : Service() {
         }
 
         floatingView = iconView
-        windowManager!!.addView(floatingView, params)
+        return true
+    }
+
+    private fun detachFloatingIcon() {
+        if (!isAttached) return
+        floatingView?.let {
+            try {
+                windowManager?.removeView(it)
+            } catch (_: Exception) {}
+        }
+        isAttached = false
     }
 
     private fun removeFloatingIcon() {
-        floatingView?.let {
-            try {
-                windowManager?.removeView(it)
-            } catch (_: Exception) {}
-        }
+        detachFloatingIcon()
         floatingView = null
         windowManager = null
+        params = null
     }
 
     private fun hideFloatingIcon() {
-        if (!isVisible) return
-        floatingView?.let {
-            try {
-                windowManager?.removeView(it)
-                isVisible = false
-            } catch (_: Exception) {}
-        }
+        detachFloatingIcon()
     }
 
-    private fun showFloatingIcon() {
-        if (isVisible && floatingView != null) return
-        if (floatingView == null) {
-            createFloatingIconView()
-        }
-        floatingView?.let {
-            try {
-                windowManager?.addView(it, params)
-                isVisible = true
-            } catch (_: Exception) {}
+    private fun showFloatingIcon(): Boolean {
+        if (!canDrawOverlays()) return false
+        if (isAttached) return true
+        if (floatingView == null && !createFloatingIconView()) return false
+        val view = floatingView ?: return false
+        val wm = windowManager ?: return false
+        val layoutParams = params ?: return false
+        return try {
+            wm.addView(view, layoutParams)
+            isAttached = true
+            true
+        } catch (e: Exception) {
+            AppLogger.e(tag, "Failed to show floating overlay", e)
+            isAttached = false
+            false
         }
     }
 
