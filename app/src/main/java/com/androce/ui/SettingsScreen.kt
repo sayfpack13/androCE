@@ -1032,7 +1032,7 @@ private fun PythonInstallDialog(
                     .verticalScroll(rememberScrollState())
             ) {
                 Text(
-                    "Python improves scan accuracy on zRAM / MemFusion devices. One tap checks Termux, installs Python if needed, and verifies it works.",
+                    "Python improves scan accuracy on zRAM / MemFusion devices. One tap bootstraps Termux if needed, installs Python, and verifies it — fully automatic.",
                     color = OnSurface,
                     fontSize = 13.sp,
                     lineHeight = 18.sp
@@ -1090,10 +1090,9 @@ private fun PythonInstallDialog(
                     SettingsCard {
                         Text(
                             "If setup fails:\n" +
-                            "1. Install Termux from F-Droid\n" +
-                            "2. Open Termux once\n" +
-                            "3. Run: pkg install python\n" +
-                            "4. Tap Setup Python again",
+                            "1. Install Termux from F-Droid (com.termux)\n" +
+                            "2. Grant root and allow internet\n" +
+                            "3. Tap Setup Python again",
                             color = OnBackground.copy(alpha = 0.8f),
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,

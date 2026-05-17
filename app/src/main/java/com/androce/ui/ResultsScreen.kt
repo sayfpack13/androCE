@@ -63,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -130,9 +131,7 @@ fun ResultsScreen(
     var showSaveDialog by rememberSaveable { mutableStateOf(false) }
     var saveName by rememberSaveable { mutableStateOf("") }
     var saveSelectedOnly by rememberSaveable { mutableStateOf(false) }
-    var showLoadDialog by rememberSaveable { mutableStateOf(false) }
     var showSavedTables by rememberSaveable { mutableStateOf(false) }
-    var tableNames by remember { mutableStateOf(viewModel.listSavedTables()) }
     // Auto-refresh timer: always enabled when results exist and no scan is running
     val isScanning = scanState is ScanState.Scanning
     val refreshInterval = AppPrefs.autoRefreshIntervalMs
@@ -154,7 +153,6 @@ fun ResultsScreen(
     LaunchedEffect(selectedProcess?.pid) {
         showBulkWriteDialog = false
         showSaveDialog = false
-        showLoadDialog = false
     }
 
     Scaffold(
@@ -197,12 +195,23 @@ fun ResultsScreen(
                     }
                 },
                 actions = {
-                    if (results.isNotEmpty()) {
-                        StatusBadge(
-                            text = "${results.size} results",
-                            isActive = true
-                        )
-                    }
+                    ResultsTopBarActions(
+                        resultsCount = results.size,
+                        selectedCount = selectedCount,
+                        allSelected = allSelected,
+                        showMenu = showMenu,
+                        onShowMenuChange = { showMenu = it },
+                        onSelectAll = { viewModel.selectAll(!allSelected) },
+                        onSave = {
+                            saveSelectedOnly = selectedCount > 0
+                            saveName = ""
+                            showSaveDialog = true
+                        },
+                        onShowSaved = { showSavedTables = true },
+                        onFreezeSelected = { viewModel.bulkFreezeSelected(true) },
+                        onUnfreezeSelected = { viewModel.bulkFreezeSelected(false) },
+                        onDeleteSelected = { viewModel.removeSelected() }
+                    )
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Background)
             )
@@ -379,48 +388,19 @@ fun ResultsScreen(
         )
     }
 
-    if (showLoadDialog) {
-        AlertDialog(
-            onDismissRequest = { showLoadDialog = false },
-            containerColor = MaterialTheme.colorScheme.surface,
-            title = {
-                Text(
-                    "Load Cheat Table",
-                    color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                if (tableNames.isEmpty()) {
-                    Text("No saved tables", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                } else {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        items(tableNames.size) { i ->
-                            Row(
-                                Modifier.fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(SurfaceVariant)
-                                    .clickable {
-                                        scope.launch { snackBarHostState.showSnackbar("Loaded ${viewModel.loadCheatTable(tableNames[i])} addresses") }
-                                        showLoadDialog = false
-                                    }
-                                    .padding(12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(tableNames[i], color = MaterialTheme.colorScheme.onBackground)
-                                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Accent, modifier = Modifier.size(16.dp))
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { showLoadDialog = false }) { Text("Close", color = Primary) } }
-        )
+    BackHandler(enabled = showSavedTables) {
+        showSavedTables = false
     }
 
     if (showSavedTables) {
         SavedTablesScreen(
             viewModel = viewModel,
-            onBack = { showSavedTables = false }
+            onBack = { showSavedTables = false },
+            onTableLoaded = { count ->
+                scope.launch {
+                    snackBarHostState.showSnackbar("Loaded $count address${if (count != 1) "es" else ""}")
+                }
+            }
         )
     }
 }
@@ -614,133 +594,92 @@ private fun ResultRow(
 }
 
 @Composable
-private fun ResultsHeader(
+private fun ResultsTopBarActions(
     resultsCount: Int,
     selectedCount: Int,
-    selectedProcess: ProcessInfo?,
     allSelected: Boolean,
-    onSelectAll: () -> Unit,
     showMenu: Boolean,
     onShowMenuChange: (Boolean) -> Unit,
-    onSaveAll: () -> Unit,
-    onSaveSelected: () -> Unit,
+    onSelectAll: () -> Unit,
+    onSave: () -> Unit,
     onShowSaved: () -> Unit,
     onFreezeSelected: () -> Unit,
     onUnfreezeSelected: () -> Unit,
     onDeleteSelected: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Background)
-            .padding(horizontal = 4.dp, vertical = 4.dp)
+    if (resultsCount > 0) {
+        StatusBadge(
+            text = "$resultsCount results",
+            isActive = true
+        )
+    }
+    IconButton(
+        onClick = onSelectAll,
+        enabled = resultsCount > 0
     ) {
-        // Title row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "Results",
-                    color = Primary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 18.sp
-                )
-                val subtitle = when {
-                    selectedProcess == null -> "No process selected"
-                    selectedCount > 0 -> "$selectedCount of $resultsCount selected · PID ${selectedProcess.pid}"
-                    else -> "$resultsCount address${if (resultsCount != 1) "es" else ""} · PID ${selectedProcess.pid}"
-                }
-                Text(
-                    subtitle,
-                    color = if (selectedProcess != null) Accent else Warning,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace
+        Icon(
+            if (allSelected) Icons.Default.Clear else Icons.Default.SelectAll,
+            contentDescription = if (allSelected) "Deselect all" else "Select all",
+            tint = Primary,
+            modifier = Modifier.size(22.dp)
+        )
+    }
+    if (resultsCount > 0) {
+        IconButton(onClick = onSave) {
+            Icon(
+                Icons.Default.Save,
+                contentDescription = if (selectedCount > 0) "Save selected" else "Save all results",
+                tint = Primary,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+    IconButton(onClick = onShowSaved) {
+        Icon(
+            Icons.Default.FolderOpen,
+            contentDescription = "Saved lists",
+            tint = Accent,
+            modifier = Modifier.size(22.dp)
+        )
+    }
+    if (selectedCount > 0) {
+        Box {
+            IconButton(onClick = { onShowMenuChange(true) }) {
+                Icon(
+                    Icons.Default.MoreVert,
+                    contentDescription = "Selection actions",
+                    tint = Primary,
+                    modifier = Modifier.size(22.dp)
                 )
             }
-
-            // Action buttons
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { onShowMenuChange(false) }
             ) {
-                IconButton(onClick = onSelectAll) {
-                    Icon(
-                        if (allSelected) Icons.Default.Clear else Icons.Default.SelectAll,
-                        contentDescription = if (allSelected) "Deselect all" else "Select all",
-                        tint = Primary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-                Box {
-                    IconButton(onClick = { onShowMenuChange(true) }) {
-                        Icon(
-                            Icons.Default.MoreVert,
-                            contentDescription = "Menu",
-                            tint = Primary,
-                            modifier = Modifier.size(22.dp)
-                        )
+                DropdownMenuItem(
+                    text = { Text("Freeze Selected ($selectedCount)") },
+                    leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = Accent) },
+                    onClick = {
+                        onShowMenuChange(false)
+                        onFreezeSelected()
                     }
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { onShowMenuChange(false) }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Save All") },
-                            leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
-                            onClick = {
-                                onShowMenuChange(false)
-                                onSaveAll()
-                            }
-                        )
-                        if (selectedCount > 0) {
-                            DropdownMenuItem(
-                                text = { Text("Save Selected ($selectedCount)") },
-                                leadingIcon = { Icon(Icons.Default.Save, contentDescription = null, tint = Accent) },
-                                onClick = {
-                                    onShowMenuChange(false)
-                                    onSaveSelected()
-                                }
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { Text("Saved Lists") },
-                            leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Accent) },
-                            onClick = {
-                                onShowMenuChange(false)
-                                onShowSaved()
-                            }
-                        )
-                        if (selectedCount > 0) {
-                            DropdownMenuItem(
-                                text = { Text("Freeze Selected ($selectedCount)") },
-                                leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = Accent) },
-                                onClick = {
-                                    onShowMenuChange(false)
-                                    onFreezeSelected()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Unfreeze Selected ($selectedCount)") },
-                                leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)) },
-                                onClick = {
-                                    onShowMenuChange(false)
-                                    onUnfreezeSelected()
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Delete Selected ($selectedCount)") },
-                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                                onClick = {
-                                    onShowMenuChange(false)
-                                    onDeleteSelected()
-                                }
-                            )
-                        }
+                )
+                DropdownMenuItem(
+                    text = { Text("Unfreeze Selected ($selectedCount)") },
+                    leadingIcon = { Icon(Icons.Default.AcUnit, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)) },
+                    onClick = {
+                        onShowMenuChange(false)
+                        onUnfreezeSelected()
                     }
-                }
+                )
+                DropdownMenuItem(
+                    text = { Text("Delete Selected ($selectedCount)") },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                    onClick = {
+                        onShowMenuChange(false)
+                        onDeleteSelected()
+                    }
+                )
             }
         }
     }

@@ -3,6 +3,7 @@ package com.androce.core
 import android.content.Context
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -28,6 +29,334 @@ object DependencyInstaller {
         val isAvailable: Boolean
     )
 
+    data class TermuxDetection(
+        val packageInstalled: Boolean,
+        val packageName: String?,
+        val dataDir: String?,
+        val filesDir: String?,
+        val prefix: String?,
+        val bootstrapped: Boolean,
+        val detail: String
+    ) {
+        val isReadyForPkg: Boolean get() = packageInstalled && bootstrapped && prefix != null
+    }
+
+    private val TERMUX_PACKAGE_CANDIDATES = listOf(
+        "com.termux",
+        "com.termux.api"
+    )
+
+    private val LEGACY_TERMUX_FILES = "/data/data/com.termux/files"
+    private val LEGACY_TERMUX_PREFIX = "$LEGACY_TERMUX_FILES/usr"
+
+    /**
+     * Detects Termux via PackageManager (installed APK) and root shell (data paths / bootstrap).
+     */
+    suspend fun detectTermux(): TermuxDetection = withContext(Dispatchers.IO) {
+        val pmPackage = TERMUX_PACKAGE_CANDIDATES.firstOrNull { isTermuxPackageInstalled(it) }
+
+        var shellPackage: String? = null
+        for (candidate in TERMUX_PACKAGE_CANDIDATES) {
+            val listed = Shell.cmd("pm list packages $candidate 2>/dev/null").exec()
+            if (listed.out.any { it.trim() == "package:$candidate" }) {
+                shellPackage = candidate
+                break
+            }
+        }
+        if (shellPackage == null) {
+            val grep = Shell.cmd("pm list packages 2>/dev/null | grep -E '^package:com\\.termux'").exec()
+            shellPackage = grep.out.firstOrNull()
+                ?.removePrefix("package:")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+        }
+
+        val packageName = pmPackage ?: shellPackage
+        if (packageName == null) {
+            return@withContext TermuxDetection(
+                packageInstalled = false,
+                packageName = null,
+                dataDir = null,
+                filesDir = null,
+                prefix = null,
+                bootstrapped = false,
+                detail = "Termux package not found"
+            )
+        }
+
+        val resolved = resolveTermuxPaths(packageName)
+        val bootstrapped = isTermuxBootstrapped(resolved.prefix)
+
+        TermuxDetection(
+            packageInstalled = true,
+            packageName = packageName,
+            dataDir = resolved.dataDir,
+            filesDir = resolved.filesDir,
+            prefix = resolved.prefix,
+            bootstrapped = bootstrapped,
+            detail = when {
+                resolved.prefix == null ->
+                    "Termux installed ($packageName) but data folder not found — open Termux once"
+                !bootstrapped ->
+                    "Termux installed ($packageName) — open the app and wait for setup to finish"
+                else ->
+                    "Termux ready at ${resolved.prefix}"
+            }
+        )
+    }
+
+    private fun isTermuxPackageInstalled(packageName: String): Boolean {
+        val ctx = AppLogger.applicationContext() ?: return false
+        return try {
+            ctx.packageManager.getPackageInfo(packageName, 0)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private data class TermuxPaths(val dataDir: String?, val filesDir: String?, val prefix: String?)
+
+    private fun resolveTermuxPaths(packageName: String): TermuxPaths {
+        var dataDir: String? = null
+
+        val dump = Shell.cmd("dumpsys package $packageName 2>/dev/null | grep -m1 'dataDir='").exec()
+        dataDir = dump.out.firstOrNull()
+            ?.substringAfter("dataDir=")
+            ?.trim()
+            ?.takeIf { it.startsWith("/") }
+
+        if (dataDir == null) {
+            val ls = Shell.cmd(
+                "ls -d /data/data/$packageName /data/user/*/$packageName 2>/dev/null | head -1"
+            ).exec()
+            dataDir = ls.out.firstOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+        }
+
+        var filesDir = dataDir?.let { "$it/files" }
+        var prefix = filesDir?.let { "$it/usr" }
+
+        if (!isTermuxBootstrapped(prefix)) {
+            if (isTermuxBootstrapped(LEGACY_TERMUX_PREFIX)) {
+                filesDir = LEGACY_TERMUX_FILES
+                prefix = LEGACY_TERMUX_PREFIX
+                if (dataDir == null) dataDir = "/data/data/com.termux"
+            }
+        }
+
+        return TermuxPaths(dataDir, filesDir, prefix)
+    }
+
+    private fun isTermuxBootstrapped(prefix: String?): Boolean {
+        if (prefix.isNullOrBlank()) return false
+        val check = Shell.cmd(
+            "if [ -x $prefix/bin/pkg ] || [ -x $prefix/bin/python3 ]; then echo BOOTSTRAPPED; else echo NO; fi"
+        ).exec()
+        return check.out.any { it.contains("BOOTSTRAPPED") }
+    }
+
+    private fun findInstalledTermuxPython(prefix: String): String? {
+        val python3 = "$prefix/bin/python3"
+        val check = Shell.cmd("$python3 --version 2>&1").exec()
+        if (check.out.any { it.trim().startsWith("Python") }) return python3
+
+        for (ver in listOf("3.12", "3.11", "3.10", "3.9", "3.8")) {
+            val path = "$prefix/bin/python$ver"
+            val verCheck = Shell.cmd("$path --version 2>&1").exec()
+            if (verCheck.out.any { it.trim().startsWith("Python") }) return path
+        }
+        return null
+    }
+
+    private fun getBootstrapArch(): String {
+        val abiList = Shell.cmd("getprop ro.product.cpu.abilist 2>/dev/null").exec()
+            .out.firstOrNull()?.lowercase().orEmpty()
+        val abi = abiList.split(",").firstOrNull().orEmpty()
+        return when {
+            abi.contains("arm64") || abi.contains("aarch64") -> "aarch64"
+            abi.contains("armeabi") || abi == "arm" -> "arm"
+            abi.contains("x86_64") -> "x86_64"
+            abi.contains("x86") || abi.contains("i686") -> "i686"
+            else -> "aarch64"
+        }
+    }
+
+    private fun execLongShell(script: String, timeoutSeconds: Int = 300): Pair<Boolean, String> {
+        return try {
+            Shell.Builder.create()
+                .setTimeout(timeoutSeconds.toLong())
+                .build()
+                .use { remote ->
+                    val out = java.util.ArrayList<String>()
+                    val err = java.util.ArrayList<String>()
+                    val result = remote.newJob().add(script).to(out, err).exec()
+                    val output = (out + err).joinToString("\n").trim()
+                    result.isSuccess to output
+                }
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Long shell command failed", e)
+            false to (e.message ?: "shell error")
+        }
+    }
+
+    private fun prepareTermuxEnvironment(termux: TermuxDetection): Boolean {
+        val dataDir = termux.dataDir ?: return false
+        val filesDir = termux.filesDir ?: "$dataDir/files"
+        val uidGid = Shell.cmd("stat -c '%u %g' $dataDir 2>/dev/null").exec()
+            .out.firstOrNull()?.trim()?.split(" ")
+            ?: return false
+        val uid = uidGid.getOrNull(0) ?: return false
+        val gid = uidGid.getOrNull(1) ?: uid
+        val prep = """
+            mkdir -p $filesDir/home $filesDir/usr-staging
+            chown -R $uid:$gid $filesDir 2>/dev/null
+            chmod 0711 $dataDir 2>/dev/null
+            chmod 0711 $filesDir 2>/dev/null
+        """.trimIndent()
+        return Shell.cmd(prep).exec().isSuccess
+    }
+
+    /**
+     * Downloads official Termux bootstrap and installs it to the Termux prefix (root, no UI).
+     */
+    private suspend fun bootstrapTermuxFromDownload(
+        termux: TermuxDetection,
+        log: suspend (String) -> Unit
+    ): Boolean {
+        val filesDir = termux.filesDir ?: termux.dataDir?.let { "$it/files" } ?: return false
+        val dataDir = termux.dataDir ?: return false
+        val arch = getBootstrapArch()
+        log("Downloading Termux bootstrap ($arch)...")
+
+        val script = """
+            set -e
+            FILES_DIR="$filesDir"
+            DATA_DIR="$dataDir"
+            STAGING="${'$'}FILES_DIR/usr-staging"
+            PREFIX="${'$'}FILES_DIR/usr"
+            TMPZIP="/data/local/tmp/androce-termux-bootstrap.zip"
+            ARCH="$arch"
+            UID=${'$'}(stat -c '%u' "${'$'}DATA_DIR")
+            GID=${'$'}(stat -c '%g' "${'$'}DATA_DIR")
+
+            rm -rf "${'$'}STAGING" "${'$'}PREFIX" "${'$'}TMPZIP"
+            mkdir -p "${'$'}STAGING" "${'$'}FILES_DIR/home"
+
+            download() {
+              for url in "${'$'}@"; do
+                if command -v curl >/dev/null 2>&1; then
+                  curl -fL --connect-timeout 25 --max-time 300 -o "${'$'}TMPZIP" "${'$'}url" && return 0
+                fi
+                if command -v wget >/dev/null 2>&1; then
+                  wget -q -O "${'$'}TMPZIP" "${'$'}url" && return 0
+                fi
+              done
+              return 1
+            }
+
+            download \
+              "https://packages.termux.dev/apt/bootstrap-${'$'}ARCH.zip" \
+              "https://packages.termux.dev/bootstrap/bootstrap-${'$'}ARCH.zip" \
+              "https://termux.net/bootstrap/bootstrap-${'$'}ARCH.zip" \
+              "https://github.com/termux/termux-packages/releases/download/bootstrap-2024.09.15-r1%2Bapt-android-7/bootstrap-${'$'}ARCH.zip" \
+              "https://github.com/termux/termux-packages/releases/download/bootstrap-2022.04.28-r5%2Bapt-android-7/bootstrap-${'$'}ARCH.zip" \
+              || exit 11
+
+            command -v unzip >/dev/null 2>&1 || exit 12
+            unzip -qo "${'$'}TMPZIP" -d "${'$'}STAGING"
+
+            if [ -f "${'$'}STAGING/SYMLINKS.txt" ]; then
+              while IFS= read -r line || [ -n "${'$'}line" ]; do
+                case "${'$'}line" in ''|\#*) continue;; esac
+                old="${'$'}{line%%←*}"
+                rel="${'$'}{line#*←}"
+                mkdir -p "${'$'}STAGING/$(dirname "${'$'}rel")"
+                ln -sf "${'$'}old" "${'$'}STAGING/${'$'}rel"
+              done < "${'$'}STAGING/SYMLINKS.txt"
+              rm -f "${'$'}STAGING/SYMLINKS.txt"
+            fi
+
+            if [ -d "${'$'}STAGING/bin" ]; then
+              find "${'$'}STAGING/bin" -type f -exec chmod 700 {} + 2>/dev/null || true
+            fi
+            if [ -d "${'$'}STAGING/libexec" ]; then
+              find "${'$'}STAGING/libexec" -type f -exec chmod 700 {} + 2>/dev/null || true
+            fi
+
+            mv "${'$'}STAGING" "${'$'}PREFIX"
+            chown -R "${'$'}UID:${'$'}GID" "${'$'}FILES_DIR"
+            chmod -R u+rwX,g+rwX "${'$'}FILES_DIR" 2>/dev/null || true
+            rm -f "${'$'}TMPZIP"
+            [ -x "${'$'}PREFIX/bin/pkg" ] || [ -x "${'$'}PREFIX/bin/bash" ]
+        """.trimIndent()
+
+        val (ok, output) = execLongShell(script, timeoutSeconds = 360)
+        AppLogger.i(TAG, "bootstrapTermuxFromDownload ok=$ok output=${output.take(1500)}")
+        if (!ok) {
+            log("Bootstrap download failed: ${output.lines().lastOrNull() ?: "unknown error"}")
+        }
+        return ok && isTermuxBootstrapped("$filesDir/usr")
+    }
+
+    /** Starts Termux launcher in background so its built-in installer can run. */
+    private suspend fun bootstrapTermuxViaActivity(packageName: String, log: suspend (String) -> Unit) {
+        log("Starting Termux bootstrap service in background...")
+        val launchScript = """
+            PKG="$packageName"
+            COMP=$(cmd package resolve-activity --brief -c android.intent.category.LAUNCHER ${'$'}PKG 2>/dev/null | tail -1)
+            if [ -n "${'$'}COMP" ] && [ "${'$'}COMP" != "No activity found" ]; then
+              am start -n "${'$'}COMP" >/dev/null 2>&1 || true
+            fi
+            am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n ${'$'}PKG/com.termux.app.HomeActivity >/dev/null 2>&1 || true
+            am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n ${'$'}PKG/.app.TermuxActivity >/dev/null 2>&1 || true
+            monkey -p ${'$'}PKG -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+        """.trimIndent()
+        Shell.cmd(launchScript).exec()
+    }
+
+    /**
+     * Ensures Termux prefix exists (bootstrap + pkg). Fully automatic — no user interaction.
+     */
+    suspend fun ensureTermuxReady(
+        termux: TermuxDetection,
+        onProgress: suspend (String) -> Unit
+    ): TermuxDetection = withContext(Dispatchers.IO) {
+        suspend fun log(msg: String) {
+            withContext(Dispatchers.Main) { onProgress(msg) }
+        }
+
+        var state = termux
+        if (state.isReadyForPkg) return@withContext state
+
+        log("Termux needs first-time setup — doing it automatically...")
+        prepareTermuxEnvironment(state)
+
+        if (bootstrapTermuxFromDownload(state, ::log)) {
+            state = detectTermux()
+            if (state.isReadyForPkg) {
+                log("Termux bootstrap installed.")
+                return@withContext state
+            }
+        }
+
+        val pkg = state.packageName ?: "com.termux"
+        bootstrapTermuxViaActivity(pkg, ::log)
+
+        repeat(90) { attempt ->
+            delay(2_000)
+            state = detectTermux()
+            if (state.isReadyForPkg) {
+                log("Termux bootstrap finished.")
+                return@withContext state
+            }
+            if (attempt % 5 == 4) {
+                log("Still setting up Termux... (${(attempt + 1) * 2}s)")
+            }
+        }
+
+        detectTermux()
+    }
+
     /**
      * Detects all available Python sources on the device.
      */
@@ -49,18 +378,23 @@ object DependencyInstaller {
         }
 
         // Check Termux Python
-        val termuxPrefix = "/data/data/com.termux/files/usr"
-        val termuxPython = "$termuxPrefix/bin/python3"
-        val termuxCheck = Shell.cmd("[ -f $termuxPython ] && echo EXISTS || echo MISSING").exec()
-        if (termuxCheck.out.any { it.contains("EXISTS") }) {
-            val fullCmd = "nsenter -t 1 -m -- /system/bin/env LD_LIBRARY_PATH=$termuxPrefix/lib PYTHONHOME=$termuxPrefix $termuxPython"
-            sources.add(PythonSource(
-                name = "Termux Python",
-                path = fullCmd,
-                description = "Python installed in Termux environment",
-                installCommand = null,
-                isAvailable = true
-            ))
+        val termux = detectTermux()
+        val termuxPrefix = termux.prefix
+        if (termuxPrefix != null) {
+            val termuxPython = findInstalledTermuxPython(termuxPrefix)
+            if (termuxPython != null) {
+                val fullCmd =
+                    "LD_LIBRARY_PATH=$termuxPrefix/lib PYTHONHOME=$termuxPrefix $termuxPython"
+                sources.add(
+                    PythonSource(
+                        name = "Termux Python",
+                        path = fullCmd,
+                        description = "Python in Termux (${termux.packageName})",
+                        installCommand = null,
+                        isAvailable = true
+                    )
+                )
+            }
         }
 
         // Check for Magisk module Python
@@ -134,18 +468,32 @@ object DependencyInstaller {
         }
 
         log("Checking Termux...")
-        val termuxCheck = Shell.cmd("[ -d /data/data/com.termux/files ] && echo EXISTS || echo MISSING").exec()
-        if (!termuxCheck.out.any { it.contains("EXISTS") }) {
-            log("Termux is not installed.")
-            log("Install Termux from F-Droid, open it once, then tap Setup Python again.")
+        val termux = detectTermux()
+        AppLogger.i(TAG, "Termux detection: ${termux.detail}")
+        log(termux.detail)
+
+        if (!termux.packageInstalled) {
+            log("Install Termux from F-Droid, then tap Setup Python again.")
             return@withContext InstallResult(
                 success = false,
-                message = "Termux required. Install from F-Droid (com.termux), open it once, then run Setup Python again."
+                message = "Termux not found. Install com.termux from F-Droid or GitHub, then run Setup Python again."
             )
         }
 
-        log("Termux found. Installing or verifying Python...")
-        val installResult = checkAndInstallPythonViaTermux()
+        var termuxReady = termux
+        if (!termuxReady.isReadyForPkg) {
+            log("Bootstrapping Termux (first-time setup)...")
+            termuxReady = ensureTermuxReady(termuxReady, ::log)
+            if (!termuxReady.isReadyForPkg) {
+                return@withContext InstallResult(
+                    success = false,
+                    message = "Could not finish Termux setup automatically. Ensure internet access and root, then try Setup Python again."
+                )
+            }
+        }
+
+        log("Installing Python in Termux...")
+        val installResult = checkAndInstallPythonViaTermux(termuxReady)
         installResult.message.lines().forEach { line ->
             if (line.isNotBlank()) log(line.trim())
         }
@@ -158,7 +506,7 @@ object DependencyInstaller {
         } else if (installResult.success) {
             InstallResult(
                 false,
-                "Python was installed but could not be loaded from root. Open Termux, run: pkg install python, then tap Setup Python again."
+                "Python was installed in Termux but androCE could not load it. Tap Setup Python again or reboot."
             )
         } else {
             installResult
@@ -168,80 +516,74 @@ object DependencyInstaller {
     /**
      * Checks if Python is available in Termux and installs it automatically if missing.
      */
-    suspend fun checkAndInstallPythonViaTermux(): InstallResult = withContext(Dispatchers.IO) {
-        // First check if Termux is installed
-        val termuxCheck = Shell.cmd("[ -d /data/data/com.termux/files ] && echo EXISTS || echo MISSING").exec()
-        if (!termuxCheck.out.any { it.contains("EXISTS") }) {
+    suspend fun checkAndInstallPythonViaTermux(
+        termux: TermuxDetection? = null
+    ): InstallResult = withContext(Dispatchers.IO) {
+        var termuxState = termux ?: detectTermux()
+        if (!termuxState.packageInstalled) {
             return@withContext InstallResult(
                 success = false,
-                message = "Termux is not installed. Please install Termux from F-Droid or GitHub first.",
+                message = "Termux is not installed. Install from F-Droid (com.termux) or GitHub.",
                 requiresReboot = false
             )
         }
 
-        // Check if Python is already installed
-        val pythonCheck = Shell.cmd("/data/data/com.termux/files/usr/bin/python3 --version 2>&1").exec()
-        if (pythonCheck.out.any { it.trim().startsWith("Python") }) {
+        if (!termuxState.isReadyForPkg) {
+            termuxState = ensureTermuxReady(termuxState) { AppLogger.i(TAG, it) }
+        }
+
+        val prefix = termuxState.prefix
+        if (prefix == null || !termuxState.bootstrapped) {
+            return@withContext InstallResult(
+                success = false,
+                message = "Termux setup did not complete. Check internet connection and tap Setup Python again.",
+                requiresReboot = false
+            )
+        }
+
+        val filesDir = termuxState.filesDir ?: "$prefix/.."
+        val homeDir = "$filesDir/home"
+
+        findInstalledTermuxPython(prefix)?.let { py ->
+            val ver = Shell.cmd("$py --version 2>&1").exec().out.firstOrNull()?.trim()
             return@withContext InstallResult(
                 success = true,
-                message = "Python is already installed in Termux: ${pythonCheck.out.firstOrNull()}",
+                message = "Python is already installed in Termux: $ver",
                 requiresReboot = false
             )
         }
 
-        // Try specific version paths
-        val versions = listOf("3.12", "3.11", "3.10", "3.9", "3.8")
-        for (ver in versions) {
-            val verCheck = Shell.cmd("/data/data/com.termux/files/usr/bin/python$ver --version 2>&1").exec()
-            if (verCheck.out.any { it.trim().startsWith("Python") }) {
-                return@withContext InstallResult(
-                    success = true,
-                    message = "Python $ver is already installed in Termux",
-                    requiresReboot = false
-                )
-            }
-        }
+        AppLogger.i(TAG, "Installing Python via Termux pkg at $prefix")
 
-        // Python not found - try to install automatically using root shell
-        AppLogger.d(TAG, "Python not found, attempting automatic installation via Termux")
-        
-        // Set up Termux environment and run pkg install
         val installCmd = """
-            export PATH=/data/data/com.termux/files/usr/bin:\${'$'}PATH
-            export HOME=/data/data/com.termux/files/home
-            export PREFIX=/data/data/com.termux/files/usr
-            export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/lib
-            /data/data/com.termux/files/usr/bin/pkg install -y python 2>&1
+            export PATH=$prefix/bin:${'$'}PATH
+            export HOME=$homeDir
+            export PREFIX=$prefix
+            export LD_LIBRARY_PATH=$prefix/lib
+            $prefix/bin/pkg install -y python 2>&1
         """.trimIndent()
 
-        val result = Shell.cmd(installCmd).exec()
-        val output = result.out.joinToString("\n")
-        
-        AppLogger.d(TAG, "Python install output: $output")
+        val (pkgOk, output) = execLongShell(installCmd, timeoutSeconds = 600)
+        AppLogger.i(TAG, "Termux pkg install ok=$pkgOk output: ${output.take(2000)}")
 
-        // Verify installation
-        val verify = Shell.cmd("/data/data/com.termux/files/usr/bin/python3 --version 2>&1").exec()
-        if (verify.out.any { it.trim().startsWith("Python") }) {
+        findInstalledTermuxPython(prefix)?.let { py ->
+            val ver = Shell.cmd("$py --version 2>&1").exec().out.firstOrNull()?.trim()
             return@withContext InstallResult(
                 success = true,
-                message = "Python installed successfully: ${verify.out.firstOrNull()}",
+                message = "Python installed successfully: $ver",
                 requiresReboot = false
             )
         }
 
-        // Installation failed
         return@withContext InstallResult(
             success = false,
             message = """
-Automatic installation failed.
+Automatic Python install failed.
 
-Please install manually:
-1. Open Termux app
-2. Run: pkg install python
-3. Return to androCE and tap Refresh
+Output:
+${output.ifBlank { "(no output)" }}
 
-Error output:
-$output
+Tap Setup Python again after checking network access.
             """.trimIndent(),
             requiresReboot = false
         )
@@ -327,8 +669,7 @@ $output
         val methods = mutableListOf<InstallMethod>()
 
         // Check Termux availability
-        val termuxCheck = Shell.cmd("[ -d /data/data/com.termux/files ] && echo EXISTS || echo MISSING").exec()
-        if (termuxCheck.out.any { it.contains("EXISTS") }) {
+        if (detectTermux().packageInstalled) {
             methods.add(InstallMethod.TERMUX)
         }
 

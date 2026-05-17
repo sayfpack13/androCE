@@ -19,7 +19,12 @@ object AppLogger {
     var filesDir: File? = null
         private set
 
+    private var appContext: Context? = null
+
+    fun applicationContext(): Context? = appContext
+
     fun init(context: Context) {
+        appContext = context.applicationContext
         filesDir = context.filesDir
         val dir = context.getExternalFilesDir(null) ?: context.filesDir
         logFile = File(dir, LOG_FILE)

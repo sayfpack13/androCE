@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -52,7 +53,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
@@ -531,18 +532,25 @@ private fun GlobalAppBar(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        FilledTonalIconButton(
+        FilledTonalButton(
             onClick = onMinimize,
-            modifier = Modifier.size(36.dp),
-            colors = IconButtonDefaults.filledTonalIconButtonColors(
+            modifier = Modifier.height(36.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            colors = ButtonDefaults.filledTonalButtonColors(
                 containerColor = SurfaceColor,
                 contentColor = Primary
             )
         ) {
             Icon(
                 imageVector = Icons.Default.Apps,
-                contentDescription = "Minimize",
-                modifier = Modifier.size(20.dp)
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "Minimize",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
             )
         }
         FilledIconButton(
