@@ -41,7 +41,7 @@
 #define HOOK_RESCAN_COUNT 4
 
 /* Bump when hook strategy changes — visible in logcat to confirm deploy. */
-#define SPEEDHOOK_BUILD "20260518-crashfix8"
+#define SPEEDHOOK_BUILD "20260518-crashfix9"
 
 extern int hook_stub_clock_gettime(clockid_t clk_id, struct timespec *tp);
 extern int hook_stub_gettimeofday(struct timeval *tv, struct timezone *tz);
