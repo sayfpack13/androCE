@@ -475,29 +475,41 @@ fun InfoBanner(
 fun WarningBanner(
     title: String,
     message: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = Error.copy(alpha = 0.1f)),
         shape = RoundedCornerShape(AppDimensions.cardCornerRadius)
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Icon(
-                Icons.Default.Warning,
-                contentDescription = null,
-                tint = Warning,
-                modifier = Modifier.size(22.dp)
-            )
-            Spacer(Modifier.width(10.dp))
-            Column {
-                Text(title, color = Warning, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                Text(message, color = OnSurface, fontSize = 12.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = Warning,
+                    modifier = Modifier.size(22.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title, color = Warning, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text(message, color = OnSurface, fontSize = 12.sp)
+                }
+            }
+            if (actionLabel != null && onAction != null) {
+                AppButton(
+                    label = actionLabel,
+                    onClick = onAction,
+                    variant = ButtonVariant.Primary,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }

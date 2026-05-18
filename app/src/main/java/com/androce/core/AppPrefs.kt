@@ -82,4 +82,9 @@ object AppPrefs {
     var scanProgress: Int
         get() = prefs.getInt("scan_progress", 0)
         set(value) = prefs.edit().putInt("scan_progress", value).apply()
+
+    /** User dismissed the first-launch Python setup prompt. */
+    var pythonSetupPromptDismissed: Boolean
+        get() = prefs.getBoolean("python_setup_prompt_dismissed", false)
+        set(value) = prefs.edit().putBoolean("python_setup_prompt_dismissed", value).apply()
 }

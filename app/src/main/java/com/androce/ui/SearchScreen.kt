@@ -84,6 +84,7 @@ import com.androce.ui.components.AppIconButton
 import com.androce.ui.components.AppTextField
 import com.androce.ui.components.ScreenScaffold
 import com.androce.ui.components.StatusBadge
+import com.androce.ui.components.WarningBanner
 import com.androce.model.ValueTypeCategory
 import com.androce.ui.theme.Accent
 import com.androce.ui.theme.AccentGreen
@@ -104,6 +105,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun SearchScreen(
     viewModel: ScanViewModel,
+    pythonReady: Boolean,
+    onSetupPython: () -> Unit,
     onBack: (() -> Unit)? = null,
     onViewResults: () -> Unit
 ) {
@@ -131,7 +134,7 @@ fun SearchScreen(
         viewModel.firstScan()
     }
 
-    val scansEnabled = selectedProcess != null
+    val scansEnabled = selectedProcess != null && pythonReady
 
     ScreenScaffold(
         title = "Memory Search",
@@ -148,6 +151,20 @@ fun SearchScreen(
         }
     ) {
         Column(Modifier.fillMaxSize()) {
+            if (!pythonReady) {
+                WarningBanner(
+                    title = "Python setup required",
+                    message = when {
+                        selectedProcess == null ->
+                            "Memory scanning needs Python. Select a process, then run setup before your first scan."
+                        else ->
+                            "Install Python to enable scanning for ${selectedProcess?.displayName()}. Setup runs in the background via Termux."
+                    },
+                    actionLabel = "Setup Python",
+                    onAction = onSetupPython,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
             ScanTab(
                 scanState = scanState,
                 results = results,

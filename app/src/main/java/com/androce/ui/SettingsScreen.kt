@@ -255,13 +255,24 @@ fun SettingsScreen() {
                 )
 
                 val pythonSources = DependencyInstaller.detectPythonSources()
-                val pythonDetail = if (pythonSources.isNotEmpty()) {
-                    val sourceNames = pythonSources.take(2).joinToString(", ") { it.name }
-                    if (pythonSources.size > 2) "$sourceNames +${pythonSources.size - 2} more" else sourceNames
-                } else "Not found — using native only (less accurate)"
+                val pythonReady = MemoryReader.isPythonAvailable
+                val pythonDetail = when {
+                    pythonReady -> {
+                        val sourceNames = pythonSources.take(2).joinToString(", ") { it.name }
+                        when {
+                            sourceNames.isNotEmpty() -> "Ready — $sourceNames"
+                            else -> "Ready"
+                        }
+                    }
+                    pythonSources.isNotEmpty() -> {
+                        val sourceNames = pythonSources.take(2).joinToString(", ") { it.name }
+                        "Found ($sourceNames) but not active — tap Install"
+                    }
+                    else -> "Required for memory scanning — tap Install"
+                }
 
                 snapshots.add(
-                    if (pythonSources.isNotEmpty())
+                    if (pythonReady)
                         RequirementSnapshot("Python", pythonDetail, RequirementLevel.OK)
                     else
                         RequirementSnapshot(
@@ -590,6 +601,13 @@ private fun ScanTab(
                 selected = scanEngine,
                 onSelected = onEngineChanged
             )
+            if (scanEngine == "python" && !MemoryReader.isPythonAvailable) {
+                Spacer(Modifier.height(12.dp))
+                WarningBanner(
+                    title = "Python not ready",
+                    message = "Install Python in Settings → Status before using the Python engine."
+                )
+            }
         }
 
         // Freeze settings
@@ -978,7 +996,7 @@ private fun <T> SettingsDropdown(
 // ===== Dependency Installation Dialogs =====
 
 @Composable
-private fun PythonInstallDialog(
+internal fun PythonInstallDialog(
     onDismiss: () -> Unit,
     onInstallComplete: (DependencyInstaller.InstallResult) -> Unit
 ) {

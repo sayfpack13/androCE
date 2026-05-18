@@ -99,6 +99,8 @@ object DependencyInstaller {
         // (especially pkg) work when executed from the root mirror, patch pkg to remove
         // its root-UID block, and neuter the bootstrap second-stage profile.d hook.
         val script = """
+            ${termuxDebMergeShellSnippet()}
+
             rm -rf "$ROOT_MIRROR_DIR"
             mkdir -p "$ROOT_MIRROR_HOME/tmp"
             cp -a "$sourcePrefix" "$ROOT_MIRROR_PREFIX"
@@ -150,7 +152,7 @@ case "${'$'}CMD" in
         fi
       done
       if [ -s "${'$'}TMPDEB" ]; then
-        dpkg-deb -x "${'$'}TMPDEB" "$ROOT_MIRROR_PREFIX" 2>/dev/null || true
+        merge_termux_deb "${'$'}TMPDEB" "$ROOT_MIRROR_PREFIX" "$ROOT_MIRROR_HOME/tmp/pkg-extract"
         rm -f "${'$'}TMPDEB"
       else
         echo "Warning: could not download ${'$'}pkgname"
@@ -199,128 +201,280 @@ PKGEOF
         return installPythonViaDebDownload(log)
     }
 
-    /** Download Python deb via Android HTTP client, then extract with shell.
-     *  Bypasses apt/pkg root checks and avoids needing curl/wget in root shell. */
-    private suspend fun installPythonViaDebDownload(log: suspend (String) -> Unit): Pair<Boolean, String> {
-        log("Downloading Python deb...")
+    private const val TERMUX_REPO_BASE = "https://packages.termux.dev/apt/termux-main"
+
+    /** Termux debs unpack to data/data/com.termux/files/usr — merge that tree into PREFIX. */
+    private fun termuxDebMergeShellSnippet(): String = """
+        merge_termux_deb() {
+          local deb="${'$'}1"
+          local dest="${'$'}2"
+          local work="${'$'}3"
+          export PATH="$ROOT_MIRROR_PREFIX/bin:${'$'}PATH"
+          export LD_LIBRARY_PATH="$ROOT_MIRROR_PREFIX/lib"
+          rm -rf "${'$'}work"
+          mkdir -p "${'$'}work"
+          if ! dpkg-deb -x "${'$'}deb" "${'$'}work" 2>&1; then
+            echo "merge_termux_deb: dpkg-deb failed for ${'$'}deb" >&2
+            return 1
+          fi
+          local usr=""
+          if [ -d "${'$'}work/data/data/com.termux/files/usr" ]; then
+            usr="${'$'}work/data/data/com.termux/files/usr"
+          elif [ -d "${'$'}work/usr" ]; then
+            usr="${'$'}work/usr"
+          else
+            echo "merge_termux_deb: no usr tree in ${'$'}deb" >&2
+            return 1
+          fi
+          cp -a "${'$'}usr/." "${'$'}dest/" || return 1
+          rm -rf "${'$'}work"
+        }
+    """.trimIndent()
+
+    /** Read control fields via mirrored dpkg-deb (bootstrap has no ar). */
+    private fun shellDpkgDebField(debFile: File, field: String): List<String> {
+        val result = Shell.cmd(
+            """PATH="$ROOT_MIRROR_PREFIX/bin:${'$'}PATH" dpkg-deb -f "${debFile.absolutePath}" $field 2>/dev/null"""
+        ).exec()
+        return result.out.map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
+    private fun parseDependsLine(line: String): List<String> =
+        line.split(",")
+            .map { it.substringBefore("|").trim() }
+            .map { it.replace(Regex("\\(.*\\)"), "").trim() }
+            .filter { it.isNotEmpty() }
+
+    private fun fixMirroredPrefixPathsShell(): String = """
+        for f in "$ROOT_MIRROR_PREFIX/bin/"*; do
+          [ -f "${'$'}f" ] || continue
+          head -c 2 "${'$'}f" | grep -q '#!' || continue
+          sed -i "1s|/data/data/com\.termux/files/usr|$ROOT_MIRROR_PREFIX|g" "${'$'}f" 2>/dev/null || true
+        done
+        if [ -d "$ROOT_MIRROR_PREFIX/libexec" ]; then
+          for f in "$ROOT_MIRROR_PREFIX/libexec/"*; do
+            [ -f "${'$'}f" ] || continue
+            head -c 2 "${'$'}f" | grep -q '#!' || continue
+            sed -i "1s|/data/data/com\.termux/files/usr|$ROOT_MIRROR_PREFIX|g" "${'$'}f" 2>/dev/null || true
+          done
+        fi
+        chmod -R 755 "$ROOT_MIRROR_PREFIX/bin" 2>/dev/null || true
+        for f in "$ROOT_MIRROR_PREFIX/bin/"* "$ROOT_MIRROR_PREFIX/lib/"* "$ROOT_MIRROR_PREFIX/libexec/"*; do
+          [ -L "${'$'}f" ] || continue
+          target=$(readlink "${'$'}f") || continue
+          case "${'$'}target" in /data/data/com.termux/files/usr/*)
+            newtarget=$(echo "${'$'}target" | sed "s|/data/data/com\.termux/files/usr|$ROOT_MIRROR_PREFIX|")
+            rm -f "${'$'}f"
+            ln -sf "${'$'}newtarget" "${'$'}f"
+            ;;
+          esac
+        done
+    """.trimIndent()
+
+    private fun verifyRootPythonShell(): String = """
+        export PATH="$ROOT_MIRROR_PREFIX/bin:${'$'}PATH"
+        export LD_LIBRARY_PATH="$ROOT_MIRROR_PREFIX/lib"
+        export PYTHONHOME="$ROOT_MIRROR_PREFIX"
+        PY="$ROOT_MIRROR_PREFIX/bin/python3"
+        if [ ! -e "${'$'}PY" ]; then
+          echo "Python binary not found at ${'$'}PY"
+          ls -la "$ROOT_MIRROR_PREFIX/bin/python"* 2>/dev/null || true
+          exit 4
+        fi
+        if LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX "${'$'}PY" --version >/dev/null 2>&1; then
+          LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX "${'$'}PY" --version 2>&1
+          echo "Python installed successfully"
+          exit 0
+        fi
+        echo "Python binary not found or missing libraries"
+        ldd "${'$'}PY" 2>&1 | head -20 || true
+        exit 4
+    """.trimIndent()
+
+    private fun parsePackageNameFromDeb(debFile: File): String? {
+        shellDpkgDebField(debFile, "Package").firstOrNull()?.let { return it }
+        // Fallback from filename: python_aarch64.deb
+        val base = debFile.nameWithoutExtension
         val arch = getBootstrapArch()
+        return base.removeSuffix("_$arch").takeIf { it.isNotEmpty() }
+    }
 
+    private fun parseDependsFromDeb(debFile: File): List<String> {
+        val depends = shellDpkgDebField(debFile, "Depends").flatMap { parseDependsLine(it) }
+        val preDepends = shellDpkgDebField(debFile, "Pre-Depends").flatMap { parseDependsLine(it) }
+        return (preDepends + depends).distinct()
+    }
+
+    private fun termuxPoolDirUrl(packageName: String): String {
+        val subdir = when {
+            // Termux: lib* packages live under pool/main/lib{X}/ (e.g. libffi → libf, libandroid-support → liba)
+            packageName.startsWith("lib") && packageName.length > 3 -> "lib${packageName[3]}"
+            else -> packageName.first().lowercase().toString()
+        }
+        return "$TERMUX_REPO_BASE/pool/main/$subdir/$packageName/"
+    }
+
+    /** Download latest version of a Termux package deb (directory index or version probe). */
+    private fun downloadTermuxPackageDeb(packageName: String, arch: String, outputFile: File): Boolean {
+        outputFile.parentFile?.mkdirs()
+        outputFile.delete()
+
+        val dirUrl = termuxPoolDirUrl(packageName)
+        try {
+            val conn = URL(dirUrl).openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 60000
+            conn.setRequestProperty("User-Agent", "androCE/1.0")
+            conn.instanceFollowRedirects = true
+            conn.connect()
+            if (conn.responseCode == 200) {
+                val html = conn.inputStream.bufferedReader().readText()
+                conn.disconnect()
+                val pattern = Regex("""${Regex.escape(packageName)}_([^"'\s]+)_$arch\.deb""")
+                val versions = pattern.findAll(html).map { it.groupValues[1] }.distinct().sorted().toList()
+                if (versions.isNotEmpty()) {
+                    val ver = versions.last()
+                    return downloadUrlToFile("$dirUrl${packageName}_${ver}_$arch.deb", outputFile)
+                }
+            } else {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            AppLogger.d(TAG, "Index fetch failed for $packageName: ${e.message}")
+        }
+
+        // Fallback: probe common version patterns (package-specific lists)
+        val versions = when (packageName) {
+            "python" -> listOf(
+                "3.13.13-1", "3.13.12-1", "3.13.11-1", "3.13.10-1", "3.13.9-1",
+                "3.12.9-1", "3.12.8-1", "3.12.7-1", "3.11.9-1"
+            )
+            else -> emptyList()
+        }
+        for (ver in versions) {
+            val url = "${termuxPoolDirUrl(packageName)}${packageName}_${ver}_$arch.deb"
+            if (downloadUrlToFile(url, outputFile)) return true
+        }
+        return false
+    }
+
+    private fun downloadUrlToFile(url: String, outputFile: File): Boolean {
+        try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 120000
+            conn.setRequestProperty("User-Agent", "androCE/1.0")
+            conn.instanceFollowRedirects = true
+            conn.connect()
+            if (conn.responseCode == 200) {
+                conn.inputStream.use { input ->
+                    outputFile.outputStream().use { output -> input.copyTo(output) }
+                }
+                conn.disconnect()
+                if (outputFile.length() > 500) {
+                    AppLogger.i(TAG, "Downloaded ${outputFile.name} (${outputFile.length()} bytes)")
+                    return true
+                }
+                outputFile.delete()
+            } else {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            AppLogger.d(TAG, "Download failed for $url: ${e.message}")
+        }
+        return false
+    }
+
+    /** Resolve install order: dependencies first, then the root package. */
+    private fun collectTermuxInstallOrder(rootDeb: File, arch: String, cacheDir: File): List<File> {
+        val order = mutableListOf<File>()
+        val seen = mutableSetOf<String>()
+
+        fun visit(deb: File) {
+            val pkg = parsePackageNameFromDeb(deb) ?: return
+            if (pkg in seen) return
+            for (dep in parseDependsFromDeb(deb)) {
+                val depDeb = File(cacheDir, "${dep}_$arch.deb")
+                if (!depDeb.isFile || depDeb.length() < 500) {
+                    if (!downloadTermuxPackageDeb(dep, arch, depDeb)) {
+                        AppLogger.w(TAG, "Could not download dependency: $dep")
+                        continue
+                    }
+                }
+                visit(depDeb)
+            }
+            seen.add(pkg)
+            order.add(deb)
+        }
+
+        visit(rootDeb)
+        return order
+    }
+
+    /** Download Python + dependencies, merge into root mirror with correct Termux paths. */
+    private suspend fun installPythonViaDebDownload(log: suspend (String) -> Unit): Pair<Boolean, String> {
+        val arch = getBootstrapArch()
         val cacheDir = AppLogger.applicationContext()?.cacheDir ?: File("/data/local/tmp")
-        val debFile = File(cacheDir, "python_${arch}.deb")
+        val pythonDeb = File(cacheDir, "python_${arch}.deb")
 
-        val downloaded = downloadPythonDeb(debFile, arch)
-        if (!downloaded) {
-            AppLogger.w(TAG, "Failed to download Python deb from all mirrors")
+        log("Downloading Python deb...")
+        if (!downloadTermuxPackageDeb("python", arch, pythonDeb)) {
+            AppLogger.w(TAG, "Failed to download Python deb")
             return false to "Failed to download Python deb"
         }
-        log("Python deb downloaded (${debFile.length()} bytes)")
+        log("Python deb downloaded (${pythonDeb.length()} bytes)")
 
-        // Copy deb into root mirror tmp so shell can access it
-        val mirrorDeb = "$ROOT_MIRROR_HOME/tmp/python.deb"
-        val copy = Shell.cmd("cp ${debFile.absolutePath} $mirrorDeb && chmod 644 $mirrorDeb").exec()
-        if (!copy.isSuccess) {
-            return false to "Failed to copy deb to mirror"
+        log("Resolving Python dependencies...")
+        val installOrder = collectTermuxInstallOrder(pythonDeb, arch, cacheDir)
+        if (installOrder.isEmpty()) {
+            AppLogger.e(TAG, "No packages to install after dependency resolution")
+            return false to "Failed to resolve Python packages (mirror dpkg-deb unavailable?)"
+        }
+        val depCount = installOrder.size - 1
+        if (depCount > 0) log("Installing $depCount dependency package(s)...")
+        AppLogger.i(TAG, "Install order: ${installOrder.map { parsePackageNameFromDeb(it) ?: it.name }}")
+
+        val mirrorTmp = "$ROOT_MIRROR_HOME/tmp"
+        Shell.cmd("mkdir -p $mirrorTmp").exec()
+
+        val debPathsOnDevice = mutableListOf<String>()
+        for (deb in installOrder) {
+            val pkg = parsePackageNameFromDeb(deb) ?: deb.nameWithoutExtension
+            if (pkg != "python") {
+                log("  → $pkg")
+            }
+            val mirrorDeb = "$mirrorTmp/${pkg}.deb"
+            val copy = Shell.cmd(
+                "cp ${deb.absolutePath} $mirrorDeb && chmod 644 $mirrorDeb"
+            ).exec()
+            if (!copy.isSuccess) {
+                return false to "Failed to stage $pkg deb"
+            }
+            debPathsOnDevice.add(mirrorDeb)
         }
 
-        // Extract with shell (only needs dpkg-deb or ar+tar, no network tools)
+        val mergeCalls = debPathsOnDevice.mapIndexed { index, deb ->
+            val pkg = deb.substringAfterLast("/").removeSuffix(".deb")
+            """merge_termux_deb "$deb" "$ROOT_MIRROR_PREFIX" "$mirrorTmp/deb-work-$index" || { echo "Failed to merge $pkg"; exit 5; }"""
+        }.joinToString("\n")
+
         val script = """
+            ${termuxDebMergeShellSnippet()}
+
             export PREFIX="$ROOT_MIRROR_PREFIX"
             export PATH="$ROOT_MIRROR_PREFIX/bin:${'$'}PATH"
             export LD_LIBRARY_PATH="$ROOT_MIRROR_PREFIX/lib"
             export PYTHONHOME="$ROOT_MIRROR_PREFIX"
 
-            # Extract Python deb directly into PREFIX
-            dpkg-deb -x "$mirrorDeb" "$ROOT_MIRROR_PREFIX" 2>/dev/null || {
-              mkdir -p "$ROOT_MIRROR_HOME/tmp/python-extract"
-              cd "$ROOT_MIRROR_HOME/tmp/python-extract"
-              ar x "$mirrorDeb" 2>/dev/null || exit 2
-              tar -xf data.tar.* 2>/dev/null || exit 3
-              if [ -d "$ROOT_MIRROR_HOME/tmp/python-extract/data/data/com.termux/files/usr" ]; then
-                cp -a "$ROOT_MIRROR_HOME/tmp/python-extract/data/data/com.termux/files/usr/"* "$ROOT_MIRROR_PREFIX/" 2>/dev/null || true
-              elif [ -d "$ROOT_MIRROR_HOME/tmp/python-extract/usr" ]; then
-                cp -a "$ROOT_MIRROR_HOME/tmp/python-extract/usr/"* "$ROOT_MIRROR_PREFIX/" 2>/dev/null || true
-              fi
-            }
-            rm -f "$mirrorDeb"
+            $mergeCalls
 
-            # Fix shebangs in bin/
-            for f in "$ROOT_MIRROR_PREFIX/bin/"*; do
-              [ -f "${'$'}f" ] || continue
-              head -c 2 "${'$'}f" | grep -q '#!' || continue
-              sed -i "1s|/data/data/com\.termux/files/usr|$ROOT_MIRROR_PREFIX|g" "${'$'}f" 2>/dev/null || true
-            done
-            # Fix shebangs in libexec/ if it exists
-            if [ -d "$ROOT_MIRROR_PREFIX/libexec" ]; then
-              for f in "$ROOT_MIRROR_PREFIX/libexec/"*; do
-                [ -f "${'$'}f" ] || continue
-                head -c 2 "${'$'}f" | grep -q '#!' || continue
-                sed -i "1s|/data/data/com\.termux/files/usr|$ROOT_MIRROR_PREFIX|g" "${'$'}f" 2>/dev/null || true
-              done
-            fi
-            chmod -R 755 "$ROOT_MIRROR_PREFIX/bin" 2>/dev/null || true
+            rm -f $mirrorTmp/*.deb 2>/dev/null || true
 
-            # Fix absolute symlinks in bin/
-            for f in "$ROOT_MIRROR_PREFIX/bin/"*; do
-              [ -L "${'$'}f" ] || continue
-              target=$(readlink "${'$'}f") || continue
-              case "${'$'}target" in /data/data/com.termux/files/usr/*)
-                newtarget=$(echo "${'$'}target" | sed "s|/data/data/com\.termux/files/usr|$ROOT_MIRROR_PREFIX|")
-                rm -f "${'$'}f"
-                ln -sf "${'$'}newtarget" "${'$'}f"
-                ;;
-              esac
-            done
+            ${fixMirroredPrefixPathsShell()}
 
-            # Verify Python runs
-            if LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX $ROOT_MIRROR_PREFIX/bin/python3 --version >/dev/null 2>&1; then
-              LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX $ROOT_MIRROR_PREFIX/bin/python3 --version 2>&1
-              echo "Python installed successfully"
-              exit 0
-            fi
-            echo "Python binary not found or missing libraries"
-            exit 4
+            ${verifyRootPythonShell()}
         """.trimIndent()
-        return execLongShell(script, timeoutSeconds = 120)
-    }
-
-    /** Download Python deb from Termux repo using Android HTTP client. */
-    private fun downloadPythonDeb(outputFile: File, arch: String): Boolean {
-        val versions = listOf(
-            "3.13.13-1", "3.13.12-1", "3.13.11-1", "3.13.10-1", "3.13.9-1",
-            "3.13.8-1", "3.13.7-1", "3.13.6-1", "3.13.5-1", "3.13.4-1",
-            "3.13.3-1", "3.13.2-1", "3.13.1-1", "3.13.0-1",
-            "3.12.9-1", "3.12.8-1", "3.12.7-1", "3.12.6-1", "3.12.5-1",
-            "3.12.4-1", "3.12.3-1", "3.12.2-1", "3.12.1-1", "3.12.0-1",
-            "3.11.9-1", "3.11.8-1", "3.11.7-1"
-        )
-        for (ver in versions) {
-            val url = "https://packages.termux.dev/apt/termux-main/pool/main/p/python/python_${ver}_${arch}.deb"
-            try {
-                val conn = java.net.URL(url).openConnection() as HttpURLConnection
-                conn.connectTimeout = 15000
-                conn.readTimeout = 120000
-                conn.setRequestProperty("User-Agent", "androCE/1.0")
-                conn.instanceFollowRedirects = true
-                conn.connect()
-                if (conn.responseCode == 200) {
-                    conn.inputStream.use { input ->
-                        outputFile.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                    conn.disconnect()
-                    if (outputFile.length() > 1000) {
-                        AppLogger.i(TAG, "Downloaded Python ${ver} ${arch} (${outputFile.length()} bytes)")
-                        return true
-                    }
-                } else {
-                    conn.disconnect()
-                }
-            } catch (e: Exception) {
-                AppLogger.d(TAG, "Download failed for ${ver}: ${e.message}")
-            }
-        }
-        return false
+        return execLongShell(script, timeoutSeconds = 300)
     }
 
     /** Root-simple Python setup: mirror Termux to /data/local/tmp, run pkg/python from there. */

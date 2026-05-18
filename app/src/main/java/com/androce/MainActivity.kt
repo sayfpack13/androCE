@@ -71,6 +71,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import kotlinx.coroutines.launch
@@ -103,6 +104,8 @@ import com.androce.ui.theme.Surface as SurfaceColor
 import com.androce.viewmodel.ProcessViewModel
 import com.androce.viewmodel.ScanViewModel
 import com.androce.core.AppPrefs
+import com.androce.core.MemoryReader
+import com.androce.ui.PythonInstallDialog
 
 class MainActivity : ComponentActivity() {
 
@@ -258,11 +261,24 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 var selectedTab by remember { bottomTab }
                 val snackbarHostState = remember { SnackbarHostState() }
+                val scope = rememberCoroutineScope()
                 val processChangeNotice by scanVm.processChangeNotice.collectAsState()
                 val selectedProcess by scanVm.selectedProcess.collectAsState()
                 val results by scanVm.results.collectAsState()
                 var loading by remember { isLoading }
                 var hasRootAccess by remember { hasRoot }
+                var pythonReady by remember { mutableStateOf(MemoryReader.isPythonAvailable) }
+                var showPythonSetupDialog by remember { mutableStateOf(false) }
+                var showSetupPromptDialog by remember { mutableStateOf(false) }
+
+                LaunchedEffect(loading, hasRootAccess) {
+                    if (!loading && hasRootAccess &&
+                        !MemoryReader.isPythonAvailable &&
+                        !AppPrefs.pythonSetupPromptDismissed
+                    ) {
+                        showSetupPromptDialog = true
+                    }
+                }
 
                 LaunchedEffect(processChangeNotice) {
                     processChangeNotice?.let { notice ->
@@ -294,9 +310,13 @@ class MainActivity : ComponentActivity() {
                         if (AppPrefs.floatingIconEnabled && canDrawOverlays()) {
                             startService(Intent(context, com.androce.core.FloatingIconService::class.java))
                         }
+                        MemoryReader.refreshPythonStatus()
                         // Minimum 500ms loading screen for smooth UX
                         kotlinx.coroutines.delay(500)
-                        withContext(kotlinx.coroutines.Dispatchers.Main) { loading = false }
+                        withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            pythonReady = MemoryReader.isPythonAvailable
+                            loading = false
+                        }
                     }
                 }
 
@@ -421,6 +441,8 @@ class MainActivity : ComponentActivity() {
                             }
                             1 -> SearchScreen(
                                 viewModel = scanVm,
+                                pythonReady = pythonReady,
+                                onSetupPython = { showPythonSetupDialog = true },
                                 onBack = {},
                                 onViewResults = { selectedTab = 2 }
                             )
@@ -459,6 +481,72 @@ class MainActivity : ComponentActivity() {
                     },
                     containerColor = SurfaceColor,
                     shape = RoundedCornerShape(16.dp)
+                )
+            }
+
+            if (showSetupPromptDialog) {
+                AlertDialog(
+                    onDismissRequest = {
+                        showSetupPromptDialog = false
+                        AppPrefs.pythonSetupPromptDismissed = true
+                    },
+                    title = { Text("Setup required", color = OnBackground) },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "androCE needs Python installed before you can scan memory. One-time setup uses Termux in the background (you don't need to open Termux).",
+                                color = OnBackground.copy(alpha = 0.85f),
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                "Open Settings → Status anytime to check progress or retry.",
+                                color = OnSurface,
+                                fontSize = 13.sp
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                showSetupPromptDialog = false
+                                showPythonSetupDialog = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Primary)
+                        ) {
+                            Text("Setup Python", color = Color.White)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                showSetupPromptDialog = false
+                                AppPrefs.pythonSetupPromptDismissed = true
+                            }
+                        ) {
+                            Text("Later", color = OnSurface)
+                        }
+                    },
+                    containerColor = SurfaceColor,
+                    shape = RoundedCornerShape(16.dp)
+                )
+            }
+
+            if (showPythonSetupDialog) {
+                PythonInstallDialog(
+                    onDismiss = {
+                        showPythonSetupDialog = false
+                        pythonReady = MemoryReader.isPythonAvailable
+                    },
+                    onInstallComplete = { result ->
+                        if (result.success) {
+                            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                MemoryReader.refreshPythonStatus()
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    pythonReady = MemoryReader.isPythonAvailable
+                                }
+                            }
+                        }
+                    }
                 )
             }
 
