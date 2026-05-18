@@ -135,8 +135,6 @@ int speedhook_is_risky_module(const char *name) {
         "libloader",
         "libdatalib",
         "com.google.android.gms",
-        "gms",
-        "ads",
         NULL
     };
 

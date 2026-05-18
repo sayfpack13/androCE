@@ -342,6 +342,8 @@ static int is_lib_loaded(int pid, const char *lib_name) {
     char line[512];
     int found = 0;
     while (fgets(line, sizeof(line), fp)) {
+        /* Skip deleted libraries - they're stale from previous injections */
+        if (strstr(line, "(deleted)")) continue;
         if (!strstr(line, lib_name)) continue;
         if (!strstr(line, ".so")) continue;
         if (strstr(line, "r-xp") || strstr(line, "r--p") || strstr(line, "rw-p")) {
