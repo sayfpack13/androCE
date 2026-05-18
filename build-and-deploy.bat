@@ -51,8 +51,9 @@ echo.
 
 REM -------- [4/4] Logcat --------
 echo [4/4] Logcat ^(Ctrl+C to stop^)...
-echo       PID-filtered: all com.androce logs including errors ^(androCE.*, SpeedInjector, crashes^)
-echo       For speed hack: pick game process, open Speed tab, tap Activate.
+echo       Logs: androCE + SpeedHook + game crashes ^(no PID filter on game tags^)
+echo       For speed hack: set speed ^(e.g. 2x^), Activate, then open the game.
+echo       Game SpeedHook logs: adb logcat -s SpeedHook:I
 call :stream_logs
 exit /b 0
 
@@ -137,5 +138,5 @@ exit /b 0
 
 :stream_logs_pid
 echo App PID: !APP_PID!
-powershell -NoProfile -Command "adb logcat -v time --pid=!APP_PID! 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
+powershell -NoProfile -Command "adb logcat -v time SpeedInjector:I SpeedInjector:E SpeedHook:I SpeedHook:E SpeedHook:W AndroidRuntime:E DEBUG:F *:S 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
 exit /b 0

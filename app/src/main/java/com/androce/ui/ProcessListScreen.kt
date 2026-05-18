@@ -79,7 +79,9 @@ import com.androce.ui.theme.SurfaceVariant
 import com.androce.viewmodel.ProcessListState
 import com.androce.viewmodel.ProcessViewModel
 import com.androce.viewmodel.SearchMode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
@@ -261,14 +263,18 @@ private fun ErrorView(message: String) {
 @Composable
 private fun rememberAppIconPainter(packageName: String): Painter? {
     val context = LocalContext.current
-    return remember(packageName) {
-        try {
-            val drawable = context.packageManager.getApplicationIcon(packageName)
-            BitmapPainter(drawable.toBitmap().asImageBitmap())
-        } catch (_: Exception) {
-            null
+    var painter by remember(packageName) { mutableStateOf<Painter?>(null) }
+    LaunchedEffect(packageName) {
+        painter = withContext(Dispatchers.IO) {
+            try {
+                val drawable = context.packageManager.getApplicationIcon(packageName)
+                BitmapPainter(drawable.toBitmap(96, 96).asImageBitmap())
+            } catch (_: Exception) {
+                null
+            }
         }
     }
+    return painter
 }
 
 @Composable

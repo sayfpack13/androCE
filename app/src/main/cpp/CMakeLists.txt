@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.10.2)
 project("speedhook")
 
 # Speed hook library for injection
-add_library(speedhook SHARED speedhook.c arm64_hook.c)
+add_library(speedhook SHARED speedhook.c hook_stub.c got_hook.c)
+
+target_compile_options(speedhook PRIVATE -fvisibility=hidden)
 
 target_link_libraries(speedhook
     log

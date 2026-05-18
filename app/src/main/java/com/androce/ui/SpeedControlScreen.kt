@@ -31,10 +31,15 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import com.androce.ui.components.SpinningLoader
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -59,7 +64,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.androce.core.HookRisk
 import com.androce.core.SpeedControl
+import com.androce.core.SpeedHookMethod
 import com.androce.core.SpeedHackState
 import com.androce.ui.components.AppButton
 import com.androce.ui.components.AppCard
@@ -91,7 +98,13 @@ fun SpeedControlScreen(
     val haptic = LocalHapticFeedback.current
     val speedState by SpeedControl.state.collectAsState()
 
+    LaunchedEffect(Unit) {
+        SpeedControl.loadHookMethodFromPrefs()
+    }
+
     var sliderValue by remember { mutableFloatStateOf(speedState.speedMultiplier) }
+    val hookMethodPickerEnabled = speedState.state == SpeedHackState.IDLE ||
+        speedState.state == SpeedHackState.FAILED
     
     // Sync slider value when speed state changes externally (presets, reset, etc.)
     LaunchedEffect(speedState.speedMultiplier) {
@@ -149,6 +162,17 @@ fun SpeedControlScreen(
                 enabled = speedState.state == SpeedHackState.ACTIVE || speedState.state == SpeedHackState.IDLE
             )
             
+            HookMethodSelector(
+                selected = speedState.hookMethod,
+                enabled = hookMethodPickerEnabled,
+                showReactivateHint = speedState.state == SpeedHackState.ACTIVE ||
+                    speedState.state == SpeedHackState.INJECTING,
+                onSelected = { method ->
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    SpeedControl.setHookMethod(method)
+                }
+            )
+
             // Preset Buttons
             PresetButtons(
                 onPresetSelected = { preset ->
@@ -328,6 +352,136 @@ private fun SpeedSliderCard(
             )
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HookMethodSelector(
+    selected: SpeedHookMethod,
+    enabled: Boolean,
+    showReactivateHint: Boolean,
+    onSelected: (SpeedHookMethod) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Surface),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "Hook method",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                color = OnBackground
+            )
+
+            ExposedDropdownMenuBox(
+                expanded = expanded,
+                onExpandedChange = { if (enabled) expanded = !expanded }
+            ) {
+                OutlinedTextField(
+                    value = selected.title,
+                    onValueChange = {},
+                    readOnly = true,
+                    enabled = enabled,
+                    singleLine = true,
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor(),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = OnBackground),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Primary,
+                        unfocusedBorderColor = SurfaceVariant,
+                        disabledBorderColor = SurfaceVariant.copy(alpha = 0.6f),
+                        focusedTextColor = OnBackground,
+                        unfocusedTextColor = OnBackground,
+                        disabledTextColor = OnSurface.copy(alpha = 0.6f)
+                    )
+                )
+                ExposedDropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false },
+                    containerColor = SurfaceHigh
+                ) {
+                    SpeedHookMethod.selectable.forEach { method ->
+                        DropdownMenuItem(
+                            text = {
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        text = method.title,
+                                        color = if (method == selected) Primary else OnBackground,
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 14.sp
+                                    )
+                                    Text(
+                                        text = method.description,
+                                        color = OnSurface,
+                                        fontSize = 11.sp,
+                                        lineHeight = 14.sp
+                                    )
+                                }
+                            },
+                            onClick = {
+                                onSelected(method)
+                                expanded = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                HookRiskBadge(selected.risk)
+                Text(
+                    text = selected.description,
+                    fontSize = 12.sp,
+                    color = OnSurface,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            if (showReactivateHint) {
+                Text(
+                    text = "Deactivate and activate again to apply a new method.",
+                    fontSize = 12.sp,
+                    color = Warning
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HookRiskBadge(risk: HookRisk) {
+    val (label, color) = when (risk) {
+        HookRisk.SAFE -> "Safe" to AccentGreen
+        HookRisk.LOW -> "Low risk" to AccentGreen
+        HookRisk.MEDIUM -> "Medium" to Warning
+        HookRisk.HIGH -> "High risk" to Error
+    }
+    Text(
+        text = label,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Bold,
+        color = color,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(color.copy(alpha = 0.15f))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    )
 }
 
 @Composable

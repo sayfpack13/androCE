@@ -49,20 +49,10 @@ sealed class ScanState {
 
 data class CheatTableMeta(val processName: String, val savedAt: Long, val entryCount: Int)
 
-/** One-shot UI notice after the attached target process changes. */
-data class ProcessChangeNotice(val message: String)
-
 class ScanViewModel : ViewModel() {
 
     private val _selectedProcess = MutableStateFlow<ProcessInfo?>(null)
     val selectedProcess: StateFlow<ProcessInfo?> = _selectedProcess
-
-    private val _processChangeNotice = MutableStateFlow<ProcessChangeNotice?>(null)
-    val processChangeNotice: StateFlow<ProcessChangeNotice?> = _processChangeNotice
-
-    fun clearProcessChangeNotice() {
-        _processChangeNotice.value = null
-    }
 
     fun setSelectedProcess(value: ProcessInfo?) {
         val current = _selectedProcess.value
@@ -71,19 +61,6 @@ class ScanViewModel : ViewModel() {
         val previous = current
         _selectedProcess.value = value
         onProcessContextChanged(previous, value)
-
-        _processChangeNotice.value = ProcessChangeNotice(buildProcessChangeMessage(previous, value))
-    }
-
-    private fun buildProcessChangeMessage(previous: ProcessInfo?, new: ProcessInfo?): String = when {
-        new == null ->
-            "Process cleared — scan results, freezes, and speed hack were reset"
-        previous == null ->
-            "Attached to ${new.displayName()} [PID ${new.pid}]"
-        previous.packageName == new.packageName && previous.pid != new.pid ->
-            "${new.displayName()} restarted (PID ${previous.pid} → ${new.pid}) — scan results cleared"
-        else ->
-            "Switched to ${new.displayName()} [PID ${new.pid}] — previous results cleared"
     }
 
     /** Drop all state that is tied to a specific target process (PID). */
@@ -1267,17 +1244,17 @@ class ScanViewModel : ViewModel() {
 
     fun activateSpeedHack() {
         val process = selectedProcess.value ?: return
-        val pid = process.pid
         val processName = process.name
+        val packageName = process.packageName
 
         val active = SpeedControl.state.value
-        if (active.state == SpeedHackState.ACTIVE && active.targetPid != pid) {
+        if (active.state == SpeedHackState.ACTIVE && active.targetPid != process.pid) {
             SpeedInjector.reset()
         }
 
         viewModelScope.launch {
-            if (!isCurrentProcess(pid)) return@launch
-            SpeedInjector.inject(pid, processName)
+            if (selectedProcess.value?.packageName != packageName) return@launch
+            SpeedInjector.inject(process.pid, packageName, processName)
         }
     }
 

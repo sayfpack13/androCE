@@ -31,8 +31,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.ui.Alignment
@@ -72,8 +70,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.setValue
@@ -260,10 +256,7 @@ class MainActivity : ComponentActivity() {
                 val scanVm: ScanViewModel = viewModel()
                 val context = LocalContext.current
                 var selectedTab by remember { bottomTab }
-                val snackbarHostState = remember { SnackbarHostState() }
                 val scope = rememberCoroutineScope()
-                val processChangeNotice by scanVm.processChangeNotice.collectAsState()
-                val selectedProcess by scanVm.selectedProcess.collectAsState()
                 val results by scanVm.results.collectAsState()
                 var loading by remember { isLoading }
                 var hasRootAccess by remember { hasRoot }
@@ -277,13 +270,6 @@ class MainActivity : ComponentActivity() {
                         !AppPrefs.pythonSetupPromptDismissed
                     ) {
                         showSetupPromptDialog = true
-                    }
-                }
-
-                LaunchedEffect(processChangeNotice) {
-                    processChangeNotice?.let { notice ->
-                        snackbarHostState.showSnackbar(notice.message)
-                        scanVm.clearProcessChangeNotice()
                     }
                 }
 
@@ -361,7 +347,6 @@ class MainActivity : ComponentActivity() {
                 } else {
                 Scaffold(
                     containerColor = Background,
-                    snackbarHost = { SnackbarHost(snackbarHostState) },
                     bottomBar = {
                         Column(
                             modifier = Modifier
@@ -372,42 +357,44 @@ class MainActivity : ComponentActivity() {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(48.dp)
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                    .height(48.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 BottomNavTab(
                                     icon = if (selectedTab == 0) Icons.Filled.Apps else Icons.Outlined.Apps,
                                     label = "Process",
-                                    badge = selectedProcess?.displayName(),
                                     selected = selectedTab == 0,
-                                    onClick = { selectedTab = 0 }
+                                    onClick = { selectedTab = 0 },
+                                    modifier = Modifier.weight(1f)
                                 )
                                 BottomNavTab(
                                     icon = if (selectedTab == 1) Icons.Filled.Memory else Icons.Outlined.Memory,
                                     label = "Scanner",
                                     selected = selectedTab == 1,
-                                    onClick = { selectedTab = 1 }
+                                    onClick = { selectedTab = 1 },
+                                    modifier = Modifier.weight(1f)
                                 )
                                 BottomNavTab(
                                     icon = if (selectedTab == 2) Icons.AutoMirrored.Filled.Article else Icons.AutoMirrored.Outlined.Article,
                                     label = "Results",
                                     badge = if (results.isNotEmpty()) results.size.toString() else null,
                                     selected = selectedTab == 2,
-                                    onClick = { selectedTab = 2 }
+                                    onClick = { selectedTab = 2 },
+                                    modifier = Modifier.weight(1f)
                                 )
                                 BottomNavTab(
                                     icon = if (selectedTab == 3) Icons.Filled.Speed else Icons.Outlined.Speed,
                                     label = "Speed",
                                     selected = selectedTab == 3,
-                                    onClick = { selectedTab = 3 }
+                                    onClick = { selectedTab = 3 },
+                                    modifier = Modifier.weight(1f)
                                 )
                                 BottomNavTab(
                                     icon = if (selectedTab == 4) Icons.Filled.Settings else Icons.Outlined.Settings,
                                     label = "Settings",
                                     selected = selectedTab == 4,
-                                    onClick = { selectedTab = 4 }
+                                    onClick = { selectedTab = 4 },
+                                    modifier = Modifier.weight(1f)
                                 )
                             }
                         }
@@ -666,27 +653,33 @@ private fun BottomNavTab(
     label: String,
     badge: String? = null,
     selected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val tint = if (selected) Primary else OnSurface.copy(alpha = 0.55f)
     Column(
-        modifier = Modifier
+        modifier = modifier
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(20.dp))
-        Text(label, color = tint, fontSize = 10.sp)
-        badge?.let {
-            Text(
-                it,
-                color = Primary,
-                fontSize = 8.sp,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 2.dp).widthIn(max = 80.dp)
-            )
+        Text(label, color = tint, fontSize = 10.sp, maxLines = 1)
+        Box(
+            modifier = Modifier.height(10.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            badge?.let {
+                Text(
+                    it,
+                    color = Primary,
+                    fontSize = 8.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 48.dp)
+                )
+            }
         }
     }
 }

@@ -3,11 +3,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <android/log.h>
-
-#define HOOK_TAG "SpeedHook"
-#define HOGE(...) __android_log_print(ANDROID_LOG_ERROR, HOOK_TAG, __VA_ARGS__)
-#define HOGD(...) __android_log_print(ANDROID_LOG_DEBUG, HOOK_TAG, __VA_ARGS__)
 
 #define PAGE_SIZE 4096
 #define PAGE_ALIGN(x) ((uintptr_t)(x) & ~(PAGE_SIZE - 1))
@@ -29,7 +24,6 @@ int arm64_hook(void *target, void *replacement, void **orig_trampoline) {
     void *tramp = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (tramp == MAP_FAILED) {
-        HOGE("mmap trampoline failed");
         return -1;
     }
 
@@ -41,7 +35,6 @@ int arm64_hook(void *target, void *replacement, void **orig_trampoline) {
     flush_cache(tramp, PATCH_SIZE + 16);
 
     if (set_rwx(target, PATCH_SIZE) != 0) {
-        HOGE("mprotect target failed");
         munmap(tramp, PAGE_SIZE);
         return -1;
     }
@@ -53,6 +46,5 @@ int arm64_hook(void *target, void *replacement, void **orig_trampoline) {
     flush_cache(target, PATCH_SIZE);
 
     *orig_trampoline = tramp;
-    HOGD("Hooked %p -> %p (tramp=%p)", target, replacement, tramp);
     return 0;
 }

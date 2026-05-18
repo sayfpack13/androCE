@@ -54,6 +54,11 @@ object AppPrefs {
         get() = prefs.getBoolean("auto_enable_speed_hack", false)
         set(value) = prefs.edit().putBoolean("auto_enable_speed_hack", value).apply()
 
+    /** Speed hook method id — see [SpeedHookMethod]. Default PLT universal (3). */
+    var speedHookMethodId: Int
+        get() = prefs.getInt("speed_hook_method_id", SpeedHookMethod.PLT_GAME.id)
+        set(value) = prefs.edit().putInt("speed_hook_method_id", value).apply()
+
     // --- Floating Icon Settings ---
 
     /** Show floating icon overlay. Default true. */

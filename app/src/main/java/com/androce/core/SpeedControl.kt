@@ -15,7 +15,8 @@ data class SpeedControlState(
     val speedMultiplier: Float = 1.0f,
     val targetPid: Int = -1,
     val targetProcessName: String = "",
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val hookMethod: SpeedHookMethod = SpeedHookMethod.PLT_GAME
 )
 
 object SpeedControl {
@@ -33,6 +34,17 @@ object SpeedControl {
     fun updateSpeed(speed: Float) {
         val clamped = speed.coerceIn(MIN_SPEED, MAX_SPEED)
         _state.value = _state.value.copy(speedMultiplier = clamped)
+    }
+
+    fun loadHookMethodFromPrefs() {
+        _state.value = _state.value.copy(
+            hookMethod = SpeedHookMethod.fromId(AppPrefs.speedHookMethodId)
+        )
+    }
+
+    fun setHookMethod(method: SpeedHookMethod) {
+        AppPrefs.speedHookMethodId = method.id
+        _state.value = _state.value.copy(hookMethod = method)
     }
 
     fun setActive(pid: Int, processName: String) {
@@ -55,7 +67,8 @@ object SpeedControl {
     }
 
     fun reset() {
-        _state.value = SpeedControlState()
+        val method = _state.value.hookMethod
+        _state.value = SpeedControlState(hookMethod = method)
     }
 
     fun isActive(): Boolean = _state.value.state == SpeedHackState.ACTIVE

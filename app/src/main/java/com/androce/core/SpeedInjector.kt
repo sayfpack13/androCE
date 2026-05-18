@@ -1,5 +1,6 @@
 package com.androce.core
 
+import android.content.Context
 import android.util.Log
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
@@ -11,14 +12,27 @@ import java.io.File
 object SpeedInjector {
     private const val TAG = "SpeedInjector"
     private const val SHM_PATH = "/data/local/tmp/speedhack_shm"
+    const val HOOK_MODE_MONITOR = 0
+    const val HOOK_MODE_LIBC = 1
+    const val HOOK_MODE_PLT_GAME = 2
+    const val HOOK_MODE_UNIVERSAL = 3
+    const val HOOK_MODE_PLT_CLOCK_ONLY = 4
+
     private const val LIB_NAME = "libspeedhook.so"
     private const val TMP_INJECTOR = "/data/local/tmp/speedinjector"
     private const val TMP_LIB = "/data/local/tmp/libspeedhook.so"
 
+    private var appContext: Context? = null
     private var libraryPath: String? = null
     private var injectorPath: String? = null
+    private val stagedLibPaths = mutableSetOf<String>()
+    private var lastHookMode = HOOK_MODE_PLT_GAME
 
-    fun init(context: android.content.Context) {
+    fun currentHookMode(): Int = SpeedControl.state.value.hookMethod.id
+
+    fun init(context: Context) {
+        SpeedControl.loadHookMethodFromPrefs()
+        appContext = context.applicationContext
         val filesDir = context.filesDir
         val nativeLibDir = context.applicationInfo.nativeLibraryDir
         val possiblePaths = mutableListOf(
@@ -34,45 +48,69 @@ object SpeedInjector {
 
         libraryPath = possiblePaths.firstOrNull { it.exists() }?.absolutePath
         if (libraryPath == null) {
-            extractLibraryFromApk(context)
+            extractLibraryFromApk(context, deviceAbi())
         }
-        // Remove stale root-owned copy that blocks app writes (EACCES on reinstall).
         Shell.cmd("rm -f '${File(filesDir, "speedinjector").absolutePath}'").exec()
-        findOrExtractInjector(context)
+        stageInjector(context, deviceAbi())
         if (injectorPath == null) {
             Log.e(TAG, "Injector not available — grant root and reinstall the app")
         }
     }
 
-    private fun resolveInjectorAbi(context: android.content.Context): String? {
-        for (abi in android.os.Build.SUPPORTED_ABIS) {
-            try {
-                context.assets.open("injectors/$abi/speedinjector").close()
-                return abi
-            } catch (_: Exception) {
-                /* try next ABI */
-            }
+    private fun deviceAbi(): String =
+        android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+
+    /** 64 = arm64, 32 = armeabi — injector is ARM64-only today. */
+    fun detectTargetElfClass(pid: Int): Int? {
+        val line = Shell.cmd("od -An -tx1 -j4 -N1 /proc/$pid/exe 2>/dev/null").exec()
+            .out.joinToString("").trim()
+        return when (line) {
+            "02" -> 64
+            "01" -> 32
+            else -> null
         }
-        return null
     }
 
-    /** Stage injector under /data/local/tmp (executable); app-private dirs are not writable/executable on many ROMs. */
-    private fun findOrExtractInjector(context: android.content.Context) {
-        val abi = resolveInjectorAbi(context)
-        if (abi == null) {
-            Log.e(TAG, "No speedinjector binary in APK assets for ABIs: ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
-            return
+    fun targetAbiForPid(pid: Int): String? = when (detectTargetElfClass(pid)) {
+        64 -> when {
+            deviceAbi().contains("arm64") -> "arm64-v8a"
+            deviceAbi().contains("x86_64") -> "x86_64"
+            else -> null
         }
+        32 -> when {
+            deviceAbi().contains("arm64") || deviceAbi().contains("armeabi") -> "armeabi-v7a"
+            deviceAbi().contains("x86") -> "x86"
+            else -> null
+        }
+        else -> null
+    }
 
-        if (stageInjectorToTmp(context, abi)) {
+    private fun ensureRoot(): Boolean {
+        if (Shell.isAppGrantedRoot() != true) {
+            Log.e(TAG, "Root not granted to com.androce")
+            return false
+        }
+        val id = Shell.cmd("id").exec().out.joinToString(" ")
+        if (!id.contains("uid=0")) {
+            Log.e(TAG, "Shell is not root: $id")
+            return false
+        }
+        return true
+    }
+
+    private fun stageInjector(context: Context, abi: String): Boolean {
+        val apkPath = context.applicationInfo.sourceDir
+        val entry = "assets/injectors/$abi/speedinjector"
+        Shell.cmd("rm -f '$TMP_INJECTOR'").exec()
+        val result = Shell.cmd(
+            "unzip -p '$apkPath' '$entry' > '$TMP_INJECTOR' && chmod 755 '$TMP_INJECTOR' && test -s '$TMP_INJECTOR'"
+        ).exec()
+        if (result.isSuccess) {
             injectorPath = TMP_INJECTOR
-            return
+            return true
         }
-
-        // Fallback: cache dir is app-writable; root copies to tmp and marks executable.
-        val cacheFile = File(context.cacheDir, "speedinjector")
         try {
-            Shell.cmd("rm -f '${cacheFile.absolutePath}'").exec()
+            val cacheFile = File(context.cacheDir, "speedinjector_$abi")
             context.assets.open("injectors/$abi/speedinjector").use { input ->
                 cacheFile.outputStream().use { output -> input.copyTo(output) }
             }
@@ -81,59 +119,104 @@ object SpeedInjector {
             ).exec()
             if (copy.isSuccess) {
                 injectorPath = TMP_INJECTOR
-            } else {
-                Log.e(TAG, "Failed to copy injector to $TMP_INJECTOR: ${copy.err}")
+                return true
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to extract injector from assets for $abi", e)
+            Log.e(TAG, "Failed to extract injector for $abi", e)
         }
+        Log.e(TAG, "Injector staging failed for ABI $abi: ${result.err.joinToString()}")
+        return false
     }
 
-    private fun stageInjectorToTmp(context: android.content.Context, abi: String): Boolean {
+    private fun libraryForTargetAbi(context: Context, abi: String): String? {
+        val cacheFile = File(context.cacheDir, "speedhook_$abi.so")
+        if (cacheFile.exists() && cacheFile.length() > 1024) {
+            return cacheFile.absolutePath
+        }
         val apkPath = context.applicationInfo.sourceDir
-        val entry = "assets/injectors/$abi/speedinjector"
-        Shell.cmd("rm -f '$TMP_INJECTOR'").exec()
+        val libPathInApk = "lib/$abi/$LIB_NAME"
         val result = Shell.cmd(
-            "unzip -p '$apkPath' '$entry' > '$TMP_INJECTOR' && chmod 755 '$TMP_INJECTOR' && test -s '$TMP_INJECTOR'"
+            "unzip -p '$apkPath' $libPathInApk > '${cacheFile.absolutePath}' && chmod 755 '${cacheFile.absolutePath}'"
         ).exec()
-        if (!result.isSuccess) {
-            Log.e(TAG, "unzip injector failed: ${result.err.joinToString()}")
-        }
-        return result.isSuccess
+        return if (result.isSuccess && cacheFile.exists()) cacheFile.absolutePath else null
     }
 
-    private fun extractLibraryFromApk(context: android.content.Context): Boolean {
-        return try {
-            val abi = android.os.Build.SUPPORTED_ABIS[0] ?: "arm64-v8a"
-            val apkPath = context.applicationInfo.sourceDir
-            val targetFile = File(context.filesDir, LIB_NAME)
-            val libPathInApk = "lib/$abi/$LIB_NAME"
+    private fun extractLibraryFromApk(context: Context, abi: String): Boolean {
+        val path = libraryForTargetAbi(context, abi) ?: return false
+        libraryPath = path
+        return true
+    }
 
-            val result = Shell.cmd(
-                "unzip -p '$apkPath' $libPathInApk > '${targetFile.absolutePath}' && chmod 755 '${targetFile.absolutePath}'"
-            ).exec()
+    fun resolveLivePid(packageName: String, fallbackPid: Int): Int? {
+        if (isProcessAlive(fallbackPid)) {
+            val owner = Shell.cmd("tr '\\0' ' ' < /proc/$fallbackPid/cmdline 2>/dev/null").exec()
+                .out.joinToString("").trim()
+            if (owner.contains(packageName)) return fallbackPid
+        }
+        val pidof = Shell.cmd("pidof '$packageName' 2>/dev/null").exec()
+            .out.firstOrNull()?.trim()?.split(Regex("\\s+"))?.firstOrNull()?.toIntOrNull()
+        if (pidof != null && isProcessAlive(pidof)) return pidof
+        return null
+    }
 
-            if (result.isSuccess && targetFile.exists()) {
-                libraryPath = targetFile.absolutePath
-                true
-            } else {
-                Log.e(TAG, "Failed to extract library: ${result.err}")
-                false
+    private inline fun withPermissiveSelinux(block: () -> Unit) {
+        val mode = Shell.cmd("getenforce 2>/dev/null").exec().out.firstOrNull()?.trim()
+        val wasEnforcing = mode.equals("Enforcing", ignoreCase = true)
+        if (wasEnforcing) {
+            val r = Shell.cmd("setenforce 0").exec()
+            Log.i(TAG, "setenforce 0 -> success=${r.isSuccess} getenforce=${Shell.cmd("getenforce").exec().out}")
+        }
+        try {
+            block()
+        } finally {
+            if (wasEnforcing) {
+                Shell.cmd("setenforce 1").exec()
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error extracting library", e)
-            false
         }
     }
 
-    suspend fun inject(pid: Int, processName: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun inject(pid: Int, packageName: String, processName: String): Boolean = withContext(Dispatchers.IO) {
         try {
             SpeedControl.setInjecting()
+
+            if (!ensureRoot()) {
+                SpeedControl.setFailed("Root not granted — open your root manager and allow androCE")
+                return@withContext false
+            }
+
+            val livePid = resolveLivePid(packageName, pid)
+            if (livePid == null) {
+                SpeedControl.setFailed("Target app is not running — open it first, then activate")
+                return@withContext false
+            }
+
+            val targetAbi = targetAbiForPid(livePid)
+            if (targetAbi == null) {
+                SpeedControl.setFailed("Could not detect target app CPU type")
+                return@withContext false
+            }
+            if (targetAbi == "armeabi-v7a" || targetAbi == "x86") {
+                SpeedControl.setFailed("Target is 32-bit — speed hack needs a 64-bit app build")
+                return@withContext false
+            }
+
+            val ctx = appContext
+            if (ctx == null) {
+                SpeedControl.setFailed("App not initialized")
+                return@withContext false
+            }
+            if (!stageInjector(ctx, targetAbi)) {
+                SpeedControl.setFailed("Injector missing for $targetAbi — reinstall androCE")
+                return@withContext false
+            }
+
             withTimeout(35_000) {
-                val libPath = libraryPath ?: run {
-                    SpeedControl.setFailed("Speed hook library not found")
-                    return@withTimeout false
-                }
+                val libPath = libraryForTargetAbi(ctx, targetAbi)
+                    ?: libraryPath
+                    ?: run {
+                        SpeedControl.setFailed("Speed hook library not found for $targetAbi")
+                        return@withTimeout false
+                    }
 
                 val injector = injectorPath ?: run {
                     SpeedControl.setFailed("Injector binary not found — reinstall the app")
@@ -141,33 +224,45 @@ object SpeedInjector {
                 }
 
                 setupSharedMemory()
+                val hookMode = currentHookMode()
+                lastHookMode = hookMode
+                writeSpeedToShm(SpeedControl.state.value.speedMultiplier, hookMode)
 
-                val injectLibPath = prepareLibraryForTarget(pid, processName, libPath)
-                    ?: run {
-                        SpeedControl.setFailed("Could not prepare library for target process")
+                var injection = InjectionResult(false, "Injection failed")
+                withPermissiveSelinux {
+                    val injectPaths = prepareLibraryForTarget(
+                        livePid,
+                        packageName.ifBlank { processName },
+                        libPath
+                    )
+                    if (injectPaths.isEmpty()) {
+                        SpeedControl.setFailed("Could not stage hook library for target app")
                         return@withTimeout false
                     }
-
-                val injection = performInjection(pid, injector, injectLibPath)
+                    for ((index, injectLibPath) in injectPaths.withIndex()) {
+                        Log.i(TAG, "Inject try ${index + 1}/${injectPaths.size}: $injectLibPath")
+                        injection = performInjection(livePid, injector, injectLibPath)
+                        if (injection.success || verifyInjection(livePid)) break
+                        if (index < injectPaths.lastIndex && isProcessAlive(livePid)) {
+                            kotlinx.coroutines.delay(250)
+                        }
+                    }
+                }
 
                 if (injection.success) {
-                    writeSpeedToShm(SpeedControl.state.value.speedMultiplier)
-                    SpeedControl.setActive(pid, processName)
-                    Log.i(TAG, "OK pid=$pid $processName")
+                    writeSpeedToShm(SpeedControl.state.value.speedMultiplier, hookMode)
+                    SpeedControl.setActive(livePid, processName)
+                    Log.i(TAG, "OK pid=$livePid $processName abi=$targetAbi hookMode=$hookMode")
                 } else {
-                    val msg = injection.error
-                        ?: "Injection failed — grant root, keep target app running, then retry"
-                    Log.e(TAG, "FAIL pid=$pid $processName: $msg")
-                    SpeedControl.setFailed(msg)
+                    Log.e(TAG, "FAIL pid=$livePid $processName: ${injection.error}")
+                    SpeedControl.setFailed(injection.error ?: "Injection failed")
                 }
 
                 injection.success
             }
         } catch (_: TimeoutCancellationException) {
             Log.e(TAG, "FAIL pid=$pid $processName: shell timeout")
-                SpeedControl.setFailed(
-                    "Injection timed out — keep Subway Surfers open in background, stay in androCE"
-                )
+            SpeedControl.setFailed("Injection timed out — reopen the target app and activate again")
             false
         } catch (e: Exception) {
             Log.e(TAG, "Injection failed", e)
@@ -176,27 +271,54 @@ object SpeedInjector {
         }
     }
 
-    /** Copy hook library into a path the target app can dlopen (owned by target UID). */
-    private fun prepareLibraryForTarget(pid: Int, processName: String, libPath: String): String? {
-        val packageName = processName.trim().ifBlank {
+    private fun removeHookLibFromApkLibDir(packageName: String) {
+        val pkg = packageName.trim()
+        if (pkg.isBlank()) return
+        Shell.cmd(
+            "rm -f /data/app/*/$pkg-*/lib/arm64/$LIB_NAME " +
+                "/data/app/*/$pkg-*/lib/arm/$LIB_NAME 2>/dev/null"
+        ).exec()
+    }
+
+    private fun prepareLibraryForTarget(
+        pid: Int,
+        packageName: String,
+        libPath: String
+    ): List<String> {
+        val pkg = packageName.trim().ifBlank {
             Shell.cmd("tr '\\0' '\\n' < /proc/$pid/cmdline | head -1").exec()
                 .out.firstOrNull()?.trim().orEmpty()
         }
-        if (packageName.isBlank()) {
+        if (pkg.isBlank()) {
             Log.e(TAG, "Could not resolve package name for pid $pid")
-            return null
+            return emptyList()
         }
 
         val uid = Shell.cmd("stat -c %u /proc/$pid").exec().out.firstOrNull()?.trim() ?: "0"
         val gid = Shell.cmd("stat -c %g /proc/$pid").exec().out.firstOrNull()?.trim() ?: uid
 
-        val destPaths = listOf(
-            "/data/data/$packageName/lib/$LIB_NAME",
-            "/data/user/0/$packageName/files/$LIB_NAME",
-            "/data/data/$packageName/files/$LIB_NAME",
-            TMP_LIB
-        )
+        val appLibDir = Shell.cmd(
+            "grep -m1 -oE '/data/app[^ ]+/lib/arm64' /proc/$pid/maps 2>/dev/null || " +
+                "grep -m1 -oE '/data/app[^ ]+/lib/arm' /proc/$pid/maps 2>/dev/null"
+        ).exec().out.firstOrNull()?.trim()
 
+        val apkLibDir = Shell.cmd(
+            "for d in /data/app/*/$pkg-*; do " +
+                "[ -d \"\$d/lib/arm64\" ] && echo \"\$d/lib/arm64\" && break; " +
+                "[ -d \"\$d/lib/arm\" ] && echo \"\$d/lib/arm\" && break; " +
+                "done"
+        ).exec().out.firstOrNull()?.trim()
+
+        val destPaths = buildList {
+            apkLibDir?.let { add("$it/$LIB_NAME") }
+            appLibDir?.let { add("$it/$LIB_NAME") }
+            add("/data/data/$pkg/files/$LIB_NAME")
+            add("/data/data/$pkg/lib/$LIB_NAME")
+            add(TMP_LIB)
+            add("/data/data/$pkg/code_cache/$LIB_NAME")
+        }.distinct()
+
+        val staged = mutableListOf<String>()
         for (dest in destPaths) {
             val parent = dest.substringBeforeLast('/')
             val cmd = buildString {
@@ -206,23 +328,37 @@ object SpeedInjector {
                 } else {
                     append(" && chown $uid:$gid '$dest'")
                     append(" && chcon u:object_r:app_data_file:s0 '$dest' 2>/dev/null || true")
+                    append(" && restorecon -F '$dest' 2>/dev/null || true")
                 }
             }
             val result = Shell.cmd(cmd).exec()
             if (result.isSuccess && Shell.cmd("test -r '$dest'").exec().isSuccess) {
-                return dest
+                stagedLibPaths.add(dest)
+                staged.add(dest)
+                Log.i(TAG, "Staged library at $dest")
             }
         }
 
-        Log.e(TAG, "Failed to stage library for $packageName")
-        return null
+        if (staged.isEmpty()) {
+            Log.e(TAG, "Failed to stage library for $pkg")
+            return emptyList()
+        }
+
+        return staged.sortedBy { path ->
+            when {
+                path.contains("/lib/arm64") || path.contains("/lib/arm/") -> 0
+                path.contains("/files/") -> 1
+                path.contains("/data/data") && path.contains("/lib/") && !path.contains("/lib/arm") -> 2
+                path == TMP_LIB -> 3
+                else -> 4
+            }
+        }
     }
 
     private fun setupSharedMemory(): Boolean {
         try {
             Shell.cmd("rm -f $SHM_PATH").exec()
             Shell.cmd("dd if=/dev/zero of=$SHM_PATH bs=4096 count=1 2>/dev/null && chmod 666 $SHM_PATH").exec()
-            writeSpeedToShm(1.0f)
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Shared memory setup failed", e)
@@ -230,11 +366,13 @@ object SpeedInjector {
         }
     }
 
-    fun writeSpeedToShm(speed: Float) {
+    fun writeSpeedToShm(speed: Float, hookMode: Int = lastHookMode) {
         try {
-            val speedBytes = java.nio.ByteBuffer.allocate(4)
+            lastHookMode = hookMode
+            val shmBytes = java.nio.ByteBuffer.allocate(8)
                 .order(java.nio.ByteOrder.LITTLE_ENDIAN)
                 .putFloat(speed)
+                .putInt(hookMode)
                 .array()
 
             val shmFile = File(SHM_PATH)
@@ -242,14 +380,14 @@ object SpeedInjector {
                 try {
                     java.io.RandomAccessFile(shmFile, "rw").use { raf ->
                         raf.seek(0)
-                        raf.write(speedBytes)
+                        raf.write(shmBytes)
                     }
                     return
                 } catch (_: Exception) { /* shell fallback */ }
             }
 
-            val octal = speedBytes.joinToString("") { b ->
-                "\\$(Integer.toOctalString((b.toInt() and 0xFF) or 0x100).substring(1))"
+            val octal = shmBytes.joinToString("") { b ->
+                "\\${Integer.toOctalString((b.toInt() and 0xFF) or 0x100).substring(1)}"
             }
             Shell.cmd("printf '$octal' > $SHM_PATH").exec()
         } catch (e: Exception) {
@@ -266,54 +404,65 @@ object SpeedInjector {
         }
 
         val result = Shell.cmd("'$injector' $pid '$libPath' 2>&1").exec()
-        val output = (result.out + result.err).joinToString("\n")
-        val injectLine = output.lines().firstOrNull { it.contains("ANDROCE_INJECT:") }
-
-        if (!output.contains("ANDROCE_INJECT: OK")) {
-            /* fall through to failure handling */
-        } else if (!verifyInjection(pid)) {
-            return InjectionResult(
-                false,
-                "Library not loaded into game — try setenforce 0, then activate again"
-            )
-        } else {
-            return InjectionResult(true)
+        val lines = result.out + result.err
+        lines.filter { it.contains("ANDROCE_INJECT") }.forEach { line ->
+            if (line.contains("FAIL") || line.contains("WARNING")) Log.e(TAG, line.trim())
+            else Log.i(TAG, line.trim())
         }
 
-        val failLine = output.lines().firstOrNull { it.contains("ANDROCE_INJECT: FAIL") }
-        if (failLine != null) {
-            Log.e(TAG, failLine.trim())
-            if (failLine.contains("timeout", ignoreCase = true)) {
-                return InjectionResult(
-                    false,
-                    "Timed out — stay in androCE until inject completes"
-                )
+        val output = lines.joinToString("\n")
+
+        if (output.contains("ANDROCE_INJECT: OK") || verifyInjection(pid)) {
+            if (verifyInjection(pid)) {
+                return InjectionResult(true)
             }
-        } else if (injectLine != null) {
-            Log.e(TAG, injectLine.trim())
+            return InjectionResult(
+                false,
+                "Hook reported OK but library not visible in memory — retry after reopening the app"
+            )
+        }
+
+        val failLine = output.lines().lastOrNull { it.contains("ANDROCE_INJECT: FAIL") }
+        if (failLine != null) {
+            when {
+                failLine.contains("crashed", ignoreCase = true) ||
+                    failLine.contains("process not found", ignoreCase = true) ||
+                    !isProcessAlive(pid) ->
+                    return InjectionResult(
+                        false,
+                        "Target app crashed during injection — reopen it, then tap Activate again"
+                    )
+                failLine.contains("timeout", ignoreCase = true) ||
+                    failLine.contains("did not stop", ignoreCase = true) ->
+                    return InjectionResult(
+                        false,
+                        "Target did not pause for injection — close other debug tools and retry"
+                    )
+                failLine.contains("32-bit", ignoreCase = true) ->
+                    return InjectionResult(false, "Target is 32-bit — use a 64-bit app")
+                failLine.contains("not readable", ignoreCase = true) ->
+                    return InjectionResult(false, "Library path not readable — reinstall androCE")
+                failLine.contains("ptrace", ignoreCase = true) ->
+                    return InjectionResult(
+                        false,
+                        "Ptrace blocked — disable other game tools, ensure root is allowed for androCE"
+                    )
+            }
+        }
+
+        if (!isProcessAlive(pid)) {
+            return InjectionResult(
+                false,
+                "Target app crashed during injection — reopen it, then tap Activate again"
+            )
         }
 
         val detail = failLine?.substringAfter("FAIL")?.trim()?.ifBlank { null }
         return InjectionResult(
             success = false,
-            error = detail ?: "Could not load libspeedhook into PID $pid (ptrace/SELinux?)"
+            error = detail?.let { "Could not load hook: $it" }
+                ?: "Linker blocked library load — reboot, confirm root for androCE, retry"
         )
-    }
-
-    private fun injectViaDebugger(pid: Int, libPath: String): Boolean {
-        val gdbCheck = Shell.cmd("which gdb 2>/dev/null").exec()
-        if (gdbCheck.out.isEmpty()) return false
-
-        val gdbScript = """
-            set timeout 5
-            attach $pid
-            call (void*)dlopen("$libPath", 2)
-            detach
-            quit
-        """.trimIndent()
-
-        Shell.cmd("echo '$gdbScript' | gdb -q 2>/dev/null").exec()
-        return verifyInjection(pid)
     }
 
     fun isProcessAlive(pid: Int): Boolean =
@@ -327,7 +476,6 @@ object SpeedInjector {
         return result.out.isNotEmpty()
     }
 
-    /** Call when returning to the app or on a timer while speed hack is "active". */
     suspend fun validateActiveInjection(): Boolean = withContext(Dispatchers.IO) {
         val state = SpeedControl.state.value
         if (state.state != com.androce.core.SpeedHackState.ACTIVE) return@withContext true
@@ -344,12 +492,16 @@ object SpeedInjector {
     }
 
     suspend fun updateSpeed(speed: Float) = withContext(Dispatchers.IO) {
-        writeSpeedToShm(speed)
+        writeSpeedToShm(speed, currentHookMode())
     }
 
     fun reset() {
         try {
             Shell.cmd("rm -f $SHM_PATH").exec()
+            stagedLibPaths.toList().forEach { path ->
+                Shell.cmd("rm -f '$path'").exec()
+            }
+            stagedLibPaths.clear()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to cleanup shared memory", e)
         }
