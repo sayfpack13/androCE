@@ -159,7 +159,11 @@ static int install_got_hooks(uint32_t mode) {
         tv = got_hook_plt_all("gettimeofday", (void *)hook_stub_gettimeofday, NULL);
     }
 
-    LOGI("GOT hooks build=%s clock=%d tv=%d mode=%u", SPEEDHOOK_BUILD, clk, tv, mode);
+    LOGI("ANDROCE_DBG: GOT hooks build=%s clock=%d tv=%d mode=%u",
+         SPEEDHOOK_BUILD, clk, tv, mode);
+    if (clk + tv == 0) {
+        LOGI("ANDROCE_DBG: GOT hooks installed zero symbols (mode=%u)", mode);
+    }
     return clk + tv;
 }
 
@@ -168,20 +172,20 @@ static void install_hooks_for_current_mode(void) {
 
     switch (g_hook_mode) {
         case HOOK_MODE_MONITOR:
-            LOGI("Hook mode: MONITOR (no hooks) build=%s", SPEEDHOOK_BUILD);
+            LOGI("ANDROCE_DBG: hook mode MONITOR build=%s", SPEEDHOOK_BUILD);
             return;
         case HOOK_MODE_LIBC:
-            LOGI("Hook mode: GOT all app libs build=%s", SPEEDHOOK_BUILD);
+            LOGI("ANDROCE_DBG: hook mode LIBC build=%s", SPEEDHOOK_BUILD);
             break;
         case HOOK_MODE_PLT_GAME:
-            LOGI("Hook mode: GOT game engines build=%s", SPEEDHOOK_BUILD);
+            LOGI("ANDROCE_DBG: hook mode PLT_GAME build=%s", SPEEDHOOK_BUILD);
             break;
         case HOOK_MODE_PLT_CLOCK_ONLY:
-            LOGI("Hook mode: GOT universal clock only build=%s", SPEEDHOOK_BUILD);
+            LOGI("ANDROCE_DBG: hook mode PLT_CLOCK_ONLY build=%s", SPEEDHOOK_BUILD);
             break;
         case HOOK_MODE_PLT_UNIVERSAL:
         default:
-            LOGI("Hook mode: GOT universal build=%s", SPEEDHOOK_BUILD);
+            LOGI("ANDROCE_DBG: hook mode PLT_UNIVERSAL build=%s", SPEEDHOOK_BUILD);
             break;
     }
 

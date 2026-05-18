@@ -92,4 +92,22 @@ object AppPrefs {
     var pythonSetupPromptDismissed: Boolean
         get() = prefs.getBoolean("python_setup_prompt_dismissed", false)
         set(value) = prefs.edit().putBoolean("python_setup_prompt_dismissed", value).apply()
+
+    // --- Dependency setup persistence (paired with /data/local/tmp/androce markers) ---
+
+    var depsTermuxBootstrapDone: Boolean
+        get() = prefs.getBoolean("deps_termux_bootstrap_done", false)
+        set(value) = prefs.edit().putBoolean("deps_termux_bootstrap_done", value).apply()
+
+    var depsRootMirrorReady: Boolean
+        get() = prefs.getBoolean("deps_root_mirror_ready", false)
+        set(value) = prefs.edit().putBoolean("deps_root_mirror_ready", value).apply()
+
+    var depsFridaReady: Boolean
+        get() = prefs.getBoolean("deps_frida_ready", false)
+        set(value) = prefs.edit().putBoolean("deps_frida_ready", value).apply()
+
+    var depsPythonReady: Boolean
+        get() = prefs.getBoolean("deps_python_ready", false)
+        set(value) = prefs.edit().putBoolean("deps_python_ready", value).apply()
 }

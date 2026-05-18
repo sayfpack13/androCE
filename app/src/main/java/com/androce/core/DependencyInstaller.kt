@@ -27,6 +27,7 @@ object DependencyInstaller {
     private const val TAG = "DependencyInstaller"
     private val bootstrapInstallMutex = Mutex()
     private val pythonSetupMutex = Mutex()
+    private val fridaSetupMutex = Mutex()
 
     data class InstallResult(
         val success: Boolean,
@@ -67,11 +68,242 @@ object DependencyInstaller {
      * /data/data/com.termux, but root can run the same tree from /data/local/tmp.
      */
     private const val ROOT_MIRROR_DIR = "/data/local/tmp/androce"
-    private const val ROOT_MIRROR_PREFIX = "$ROOT_MIRROR_DIR/usr"
+    internal const val ROOT_MIRROR_PREFIX = "$ROOT_MIRROR_DIR/usr"
     private const val ROOT_MIRROR_HOME = "$ROOT_MIRROR_DIR/home"
+
+    /** Root-executable copy of frida-server (Termux paths are not runnable as root). */
+    const val ROOT_FRIDA_SERVER = "/data/local/tmp/frida-server"
+
+    private const val MARKER_MIRROR_OK = "$ROOT_MIRROR_DIR/.mirror_ok"
+    private const val MARKER_FRIDA_OK = "$ROOT_MIRROR_DIR/.frida_ok"
+    private const val MARKER_PYTHON_OK = "$ROOT_MIRROR_DIR/.python_ok"
+    private const val MARKER_BOOTSTRAP_OK = "$ROOT_MIRROR_DIR/.bootstrap_ok"
+    private const val DEVICE_DEB_CACHE = "$ROOT_MIRROR_DIR/cache"
+
+    data class SetupProbe(
+        val termuxBootstrap: Boolean,
+        val rootMirror: Boolean,
+        val fridaReady: Boolean,
+        val pythonReady: Boolean,
+        val fridaCli: String?,
+        val summary: String
+    )
+
+    /** Quick check for install dialogs — avoid re-running full setup when already done. */
+    fun probeSetupState(): SetupProbe {
+        val bootstrap = isBootstrapInstalled("com.termux") ||
+            TERMUX_PACKAGE_CANDIDATES.any { isBootstrapInstalled(it) }
+        val mirror = isMirrorPersisted()
+        val fridaCli = findRootMirroredFridaCli()
+        val frida = isRootFridaReady() || (isFridaPersisted() && fridaCli != null)
+        val python = findRootMirroredPython() != null || isPythonPersisted()
+        val summary = buildString {
+            append("bootstrap=").append(if (bootstrap) "ok" else "no")
+            append(" mirror=").append(if (mirror) "ok" else "no")
+            append(" frida=").append(if (frida) "ok" else "no")
+            append(" python=").append(if (python) "ok" else "no")
+            fridaCli?.let { append("\nfrida CLI: ").append(it) }
+            append("\nlog: ").append(SetupLogger.DEVICE_LOG_PATH)
+        }
+        return SetupProbe(bootstrap, mirror, frida, python, fridaCli, summary)
+    }
+
+    fun isFridaSetupComplete(): Boolean = probeSetupState().fridaReady
+
+    fun isPythonSetupComplete(): Boolean = probeSetupState().pythonReady
 
     fun buildRootPythonCommand(pythonBin: String = "$ROOT_MIRROR_PREFIX/bin/python3"): String =
         "LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX $pythonBin"
+
+    fun buildRootFridaEnv(): String =
+        "LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX PATH=$ROOT_MIRROR_PREFIX/bin:\$PATH"
+
+    private fun rootMirrorBashReady(): Boolean =
+        Shell.cmd("[ -x $ROOT_MIRROR_PREFIX/bin/bash ]").exec().isSuccess
+
+    private fun hasMarker(path: String): Boolean =
+        Shell.cmd("test -s '$path'").exec().isSuccess
+
+    private fun writeMarker(path: String, value: String) {
+        Shell.cmd("mkdir -p '$ROOT_MIRROR_DIR' && printf '%s' '$value' > '$path'").exec()
+    }
+
+    private fun markBootstrapComplete(packageName: String) {
+        writeMarker(MARKER_BOOTSTRAP_OK, packageName)
+        AppPrefs.depsTermuxBootstrapDone = true
+        SetupLogger.append("bootstrap marked complete ($packageName)")
+    }
+
+    private fun markMirrorComplete() {
+        writeMarker(MARKER_MIRROR_OK, getBootstrapArch())
+        AppPrefs.depsRootMirrorReady = true
+        SetupLogger.append("root mirror marked complete")
+    }
+
+    private fun markFridaComplete(version: String) {
+        writeMarker(MARKER_FRIDA_OK, version)
+        AppPrefs.depsFridaReady = true
+        SetupLogger.append("frida marked complete ($version)")
+    }
+
+    private fun markPythonComplete(version: String) {
+        writeMarker(MARKER_PYTHON_OK, version)
+        AppPrefs.depsPythonReady = true
+        SetupLogger.append("python marked complete ($version)")
+    }
+
+    private fun clearFridaMarkers() {
+        Shell.cmd("rm -f '$MARKER_FRIDA_OK'").exec()
+        AppPrefs.depsFridaReady = false
+    }
+
+    private fun deviceCachedDebPath(packageName: String, arch: String): String =
+        "$DEVICE_DEB_CACHE/${packageName}_${arch}.deb"
+
+    private fun copyDebToDeviceCache(localDeb: File, packageName: String, arch: String): String {
+        val dest = deviceCachedDebPath(packageName, arch)
+        Shell.cmd("mkdir -p '$DEVICE_DEB_CACHE'").exec()
+        Shell.cmd("cp '${localDeb.absolutePath}' '$dest' && chmod 644 '$dest'").exec()
+        return dest
+    }
+
+    private fun loadDebFromDeviceCache(packageName: String, arch: String, outputFile: File): Boolean {
+        val cached = deviceCachedDebPath(packageName, arch)
+        val check = Shell.cmd("test -s '$cached' && stat -c '%s' '$cached' 2>/dev/null").exec()
+        val size = check.out.firstOrNull()?.trim()?.toLongOrNull() ?: 0L
+        if (size < 50_000L) return false
+        val copy = Shell.cmd("cp '$cached' '${outputFile.absolutePath}'").exec()
+        return copy.isSuccess && outputFile.length() > 50_000L
+    }
+
+    private fun isMirrorPersisted(): Boolean =
+        (AppPrefs.depsRootMirrorReady || hasMarker(MARKER_MIRROR_OK)) && rootMirrorBashReady()
+
+    private fun isFridaPersisted(): Boolean {
+        val cli = findRootMirroredFridaCli()
+        if (cli == null) {
+            if (hasMarker(MARKER_FRIDA_OK) || AppPrefs.depsFridaReady) {
+                SetupLogger.append("frida marker set but CLI missing — will reinstall")
+                clearFridaMarkers()
+            }
+            return false
+        }
+        return (AppPrefs.depsFridaReady || hasMarker(MARKER_FRIDA_OK)) && rootFridaVersion(cli) != null
+    }
+
+    private fun isPythonPersisted(): Boolean =
+        (AppPrefs.depsPythonReady || hasMarker(MARKER_PYTHON_OK)) && findRootMirroredPython() != null
+
+    private fun rootFridaVersion(fridaBin: String = "$ROOT_MIRROR_PREFIX/bin/frida"): String? {
+        val check = Shell.cmd("${buildRootFridaEnv()} '$fridaBin' --version 2>&1").exec()
+        val line = check.out.joinToString(" ").trim()
+        return line.takeIf { it.contains("frida", ignoreCase = true) || it.matches(Regex(".*\\d+\\.\\d+.*")) }
+    }
+
+    internal fun findRootMirroredFridaCli(): String? {
+        val env = buildRootFridaEnv()
+        for (name in listOf("frida", "frida-ps", "frida-ls-devices")) {
+            val bin = "$ROOT_MIRROR_PREFIX/bin/$name"
+            if (!Shell.cmd("[ -f '$bin' ] && [ -s '$bin' ]").exec().isSuccess) continue
+            val out = Shell.cmd("$env '$bin' --version 2>&1").exec().out.joinToString(" ")
+            if (out.contains("frida", ignoreCase = true) || out.matches(Regex(".*\\d+\\.\\d+.*"))) {
+                return bin
+            }
+            val help = Shell.cmd("$env '$bin' --help 2>&1").exec().out.joinToString(" ")
+            if (help.contains("frida", ignoreCase = true) && !help.contains("CANNOT LINK", ignoreCase = true)) {
+                return bin
+            }
+        }
+        return null
+    }
+
+    private fun findRootMirroredFridaServer(): String? {
+        for (path in listOf(
+            "$ROOT_MIRROR_PREFIX/bin/frida-server",
+            "$ROOT_MIRROR_PREFIX/lib/frida/frida-server",
+            ROOT_FRIDA_SERVER
+        )) {
+            if (Shell.cmd("test -f '$path'").exec().isSuccess) return path
+        }
+        return null
+    }
+
+    /** True when file(1) reports a valid ELF and the binary runs (--version). */
+    private fun isFridaServerElfValid(path: String): Boolean {
+        val fileOut = Shell.cmd("file '$path' 2>&1").exec().out.joinToString(" ")
+        SetupLogger.append("frida-server file: $path → $fileOut")
+        if (fileOut.contains("bad", ignoreCase = true)) return false
+        if (!fileOut.contains("ELF", ignoreCase = true)) return false
+        if (fileOut.contains("script", ignoreCase = true)) return false
+        val runOut = Shell.cmd(
+            "${buildRootFridaEnv()} '$path' --version 2>&1"
+        ).exec().out.joinToString(" ")
+        if (runOut.contains("CANNOT LINK", ignoreCase = true)) return false
+        if (runOut.contains("DT_HASH", ignoreCase = true)) return false
+        if (runOut.contains("DT_GNU_HASH", ignoreCase = true)) return false
+        return runOut.contains("Frida", ignoreCase = true) ||
+            runOut.matches(Regex(".*\\d+\\.\\d+.*"))
+    }
+
+    private suspend fun stageFridaServerForRoot(log: suspend (String) -> Unit): Boolean {
+        val source = findRootMirroredFridaServer() ?: return false
+        if (!isFridaServerElfValid(source)) {
+            log("frida-server at $source is corrupt — need frida package (not frida-python only)")
+            SetupLogger.append("stageFridaServer: INVALID ELF at $source")
+            return false
+        }
+        log("Staging frida-server launcher...")
+        val wrapper = "$ROOT_MIRROR_DIR/run-frida-server.sh"
+        val script = """
+            cat > '$wrapper' << 'EOF'
+#!/system/bin/sh
+export LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib
+export PATH=$ROOT_MIRROR_PREFIX/bin:${'$'}PATH
+export PYTHONHOME=$ROOT_MIRROR_PREFIX
+exec '$source' -D "${'$'}@"
+EOF
+            chmod 755 '$wrapper'
+            test -x '$wrapper' && echo OK || echo FAIL
+        """.trimIndent()
+        val ok = Shell.cmd(script).exec().isSuccess &&
+            Shell.cmd("test -x '$wrapper'").exec().isSuccess
+        if (!ok) log("Could not write frida-server launcher")
+        return ok
+    }
+
+    private fun verifyRootFridaShell(): String = """
+        export PATH="$ROOT_MIRROR_PREFIX/bin:${'$'}PATH"
+        export LD_LIBRARY_PATH="$ROOT_MIRROR_PREFIX/lib"
+        export PYTHONHOME="$ROOT_MIRROR_PREFIX"
+        FRIDA="$ROOT_MIRROR_PREFIX/bin/frida"
+        SERVER="$ROOT_MIRROR_PREFIX/bin/frida-server"
+        [ ! -x "${'$'}SERVER" ] && SERVER="$ROOT_MIRROR_PREFIX/lib/frida/frida-server"
+        if [ ! -e "${'$'}FRIDA" ]; then
+          echo "frida CLI not found at ${'$'}FRIDA (install frida-python into mirror)"
+          ls -la "$ROOT_MIRROR_PREFIX/bin/frida"* 2>/dev/null | head -20 || true
+          exit 4
+        fi
+        if LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX PATH=$ROOT_MIRROR_PREFIX/bin:${'$'}PATH "${'$'}FRIDA" --version >/dev/null 2>&1; then
+          LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX PATH=$ROOT_MIRROR_PREFIX/bin:${'$'}PATH "${'$'}FRIDA" --version 2>&1
+          if [ ! -x "${'$'}SERVER" ]; then
+            echo "frida-server binary missing"
+            exit 4
+          fi
+          FILEINFO=${'$'}(file "${'$'}SERVER" 2>&1)
+          echo "${'$'}FILEINFO"
+          echo "${'$'}FILEINFO" | grep -q "bad" && exit 4
+          echo "${'$'}FILEINFO" | grep -q "ELF" || exit 4
+          LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX PATH=$ROOT_MIRROR_PREFIX/bin:${'$'}PATH "${'$'}SERVER" --version >/dev/null 2>&1 || exit 4
+          LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX PATH=$ROOT_MIRROR_PREFIX/bin:${'$'}PATH "${'$'}SERVER" --version 2>&1
+          echo "frida-server OK at ${'$'}SERVER"
+          exit 0
+        fi
+        echo "frida CLI not runnable"
+        head -5 "${'$'}FRIDA" 2>&1 || true
+        LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib PYTHONHOME=$ROOT_MIRROR_PREFIX PATH=$ROOT_MIRROR_PREFIX/bin:${'$'}PATH "${'$'}FRIDA" --version 2>&1 | head -5 || true
+        exit 4
+    """.trimIndent()
+
 
     private fun rootPythonVersion(pythonBin: String): String? {
         val check = Shell.cmd("${buildRootPythonCommand(pythonBin)} --version 2>&1").exec()
@@ -93,8 +325,17 @@ object DependencyInstaller {
         return true
     }
 
-    private suspend fun mirrorTermuxPrefixToRoot(sourcePrefix: String, log: suspend (String) -> Unit): Boolean {
-        log("Copying Termux → $ROOT_MIRROR_DIR (root-accessible)...")
+    private suspend fun mirrorTermuxPrefixToRoot(
+        sourcePrefix: String,
+        log: suspend (String) -> Unit,
+        force: Boolean = false
+    ): Boolean {
+        if (!force && isMirrorPersisted()) {
+            log("Root mirror already present — skipping Termux copy")
+            return true
+        }
+
+        log("Copying Termux → $ROOT_MIRROR_DIR (root-accessible, one-time)...")
         // After copying, fix shebangs that point to the original Termux path so scripts
         // (especially pkg) work when executed from the root mirror, patch pkg to remove
         // its root-UID block, and neuter the bootstrap second-stage profile.d hook.
@@ -192,16 +433,29 @@ PKGEOF
         """.trimIndent()
         val (ok, out) = execLongShell(script, timeoutSeconds = 300)
         val success = ok && out.contains("OK")
-        if (!success) log("Copy failed: ${out.lines().lastOrNull { it.isNotBlank() } ?: "unknown"}")
+        if (success) {
+            markMirrorComplete()
+        } else {
+            log("Copy failed: ${out.lines().lastOrNull { it.isNotBlank() } ?: "unknown"}")
+        }
         return success
     }
 
     private suspend fun installPythonInRootMirror(log: suspend (String) -> Unit): Pair<Boolean, String> {
+        if (isPythonPersisted()) {
+            log("Python already installed in root mirror — skipping download")
+            return true to "Python already installed"
+        }
         log("Installing Python with root...")
-        return installPythonViaDebDownload(log)
+        val result = installPythonViaDebDownload(log)
+        if (result.first) {
+            findRootMirroredPython()?.let { markPythonComplete(rootPythonVersion(it) ?: "ok") }
+        }
+        return result
     }
 
     private const val TERMUX_REPO_BASE = "https://packages.termux.dev/apt/termux-main"
+    private const val TERMUX_ROOT_REPO_BASE = "https://packages.termux.dev/apt/termux-root"
 
     /** Termux debs unpack to data/data/com.termux/files/usr — merge that tree into PREFIX. */
     private fun termuxDebMergeShellSnippet(): String = """
@@ -259,6 +513,10 @@ PKGEOF
           done
         fi
         chmod -R 755 "$ROOT_MIRROR_PREFIX/bin" 2>/dev/null || true
+        for f in "$ROOT_MIRROR_PREFIX/bin/frida"*; do
+          [ -f "${'$'}f" ] || continue
+          grep -q com.termux "${'$'}f" 2>/dev/null && sed -i "s|/data/data/com\.termux/files/usr|$ROOT_MIRROR_PREFIX|g" "${'$'}f" 2>/dev/null || true
+        done
         for f in "$ROOT_MIRROR_PREFIX/bin/"* "$ROOT_MIRROR_PREFIX/lib/"* "$ROOT_MIRROR_PREFIX/libexec/"*; do
           [ -L "${'$'}f" ] || continue
           target=$(readlink "${'$'}f") || continue
@@ -305,21 +563,31 @@ PKGEOF
         return (preDepends + depends).distinct()
     }
 
-    private fun termuxPoolDirUrl(packageName: String): String {
+    private fun termuxPoolDirUrl(
+        packageName: String,
+        repoBase: String = TERMUX_REPO_BASE,
+        poolSegment: String = "main"
+    ): String {
         val subdir = when {
             // Termux: lib* packages live under pool/main/lib{X}/ (e.g. libffi → libf, libandroid-support → liba)
             packageName.startsWith("lib") && packageName.length > 3 -> "lib${packageName[3]}"
             else -> packageName.first().lowercase().toString()
         }
-        return "$TERMUX_REPO_BASE/pool/main/$subdir/$packageName/"
+        return "$repoBase/pool/$poolSegment/$subdir/$packageName/"
     }
 
     /** Download latest version of a Termux package deb (directory index or version probe). */
-    private fun downloadTermuxPackageDeb(packageName: String, arch: String, outputFile: File): Boolean {
+    private fun downloadTermuxPackageDeb(
+        packageName: String,
+        arch: String,
+        outputFile: File,
+        repoBase: String = TERMUX_REPO_BASE,
+        poolSegment: String = "main"
+    ): Boolean {
         outputFile.parentFile?.mkdirs()
         outputFile.delete()
 
-        val dirUrl = termuxPoolDirUrl(packageName)
+        val dirUrl = termuxPoolDirUrl(packageName, repoBase, poolSegment)
         try {
             val conn = URL(dirUrl).openConnection() as HttpURLConnection
             conn.connectTimeout = 15000
@@ -352,10 +620,55 @@ PKGEOF
             else -> emptyList()
         }
         for (ver in versions) {
-            val url = "${termuxPoolDirUrl(packageName)}${packageName}_${ver}_$arch.deb"
+            val url = "${termuxPoolDirUrl(packageName, repoBase, poolSegment)}${packageName}_${ver}_$arch.deb"
             if (downloadUrlToFile(url, outputFile)) return true
         }
         return false
+    }
+
+    /** Full frida package (termux-root) — includes valid frida-server ELF + tools. */
+    private fun downloadFridaCoreDeb(arch: String, outputFile: File): Boolean {
+        if (loadDebFromDeviceCache("frida", arch, outputFile)) {
+            SetupLogger.append("deb cache hit: frida ($arch, ${outputFile.length()} bytes)")
+            return true
+        }
+        if (downloadTermuxPackageDeb("frida", arch, outputFile, TERMUX_ROOT_REPO_BASE, "stable")) {
+            copyDebToDeviceCache(outputFile, "frida", arch)
+            return true
+        }
+        val base = termuxPoolDirUrl("frida", TERMUX_ROOT_REPO_BASE, "stable")
+        for (ver in listOf("17.2.14-3", "16.5.7-1", "16.0.19-1")) {
+            if (downloadUrlToFile("${base}frida_${ver}_$arch.deb", outputFile)) {
+                copyDebToDeviceCache(outputFile, "frida", arch)
+                return true
+            }
+        }
+        return false
+    }
+
+    /** Try main repo first, then termux-root stable (for Frida dependencies). */
+    private fun downloadPackageDebAnyRepo(packageName: String, arch: String, outputFile: File): Boolean {
+        if (downloadTermuxPackageDeb(packageName, arch, outputFile, TERMUX_REPO_BASE, "main")) return true
+        return downloadTermuxPackageDeb(packageName, arch, outputFile, TERMUX_ROOT_REPO_BASE, "stable")
+    }
+
+    private fun downloadPackageDebWithCache(
+        packageName: String,
+        arch: String,
+        outputFile: File,
+        repoBase: String = TERMUX_REPO_BASE,
+        poolSegment: String = "main"
+    ): Boolean {
+        if (loadDebFromDeviceCache(packageName, arch, outputFile)) {
+            SetupLogger.append("deb cache hit: $packageName ($arch, ${outputFile.length()} bytes)")
+            return true
+        }
+        SetupLogger.append("deb cache miss: $packageName — downloading")
+        if (!downloadTermuxPackageDeb(packageName, arch, outputFile, repoBase, poolSegment)) {
+            return false
+        }
+        copyDebToDeviceCache(outputFile, packageName, arch)
+        return true
     }
 
     private fun downloadUrlToFile(url: String, outputFile: File): Boolean {
@@ -396,8 +709,13 @@ PKGEOF
             for (dep in parseDependsFromDeb(deb)) {
                 val depDeb = File(cacheDir, "${dep}_$arch.deb")
                 if (!depDeb.isFile || depDeb.length() < 500) {
-                    if (!downloadTermuxPackageDeb(dep, arch, depDeb)) {
+                    val haveDep = loadDebFromDeviceCache(dep, arch, depDeb) ||
+                        downloadPackageDebAnyRepo(dep, arch, depDeb)
+                    if (haveDep) {
+                        copyDebToDeviceCache(depDeb, dep, arch)
+                    } else {
                         AppLogger.w(TAG, "Could not download dependency: $dep")
+                        SetupLogger.append("dependency download failed: $dep")
                         continue
                     }
                 }
@@ -418,7 +736,7 @@ PKGEOF
         val pythonDeb = File(cacheDir, "python_${arch}.deb")
 
         log("Downloading Python deb...")
-        if (!downloadTermuxPackageDeb("python", arch, pythonDeb)) {
+        if (!downloadPackageDebWithCache("python", arch, pythonDeb)) {
             AppLogger.w(TAG, "Failed to download Python deb")
             return false to "Failed to download Python deb"
         }
@@ -477,6 +795,163 @@ PKGEOF
         return execLongShell(script, timeoutSeconds = 300)
     }
 
+    /** Download Frida + dependencies from termux-root into the root mirror. */
+    private suspend fun installFridaViaDebDownload(log: suspend (String) -> Unit): Pair<Boolean, String> {
+        val existingServer = findRootMirroredFridaServer()
+        if (existingServer != null && !isFridaServerElfValid(existingServer)) {
+            log("Replacing corrupt frida-server (frida-python-only install)...")
+            SetupLogger.append("removing corrupt frida-server before reinstall")
+            clearFridaMarkers()
+            Shell.cmd(
+                "rm -f '$ROOT_FRIDA_SERVER' '$ROOT_MIRROR_PREFIX/bin/frida-server' " +
+                    "'$ROOT_MIRROR_PREFIX/lib/frida/frida-server' 2>/dev/null"
+            ).exec()
+        } else if (isFridaPersisted() && existingServer != null && isFridaServerElfValid(existingServer)) {
+            log("Frida already installed in root mirror — skipping download")
+            stageFridaServerForRoot(log)
+            val ver = rootFridaVersion() ?: "Frida"
+            return true to "Frida already installed ($ver)"
+        }
+
+        val arch = getBootstrapArch()
+        val cacheDir = AppLogger.applicationContext()?.cacheDir ?: File("/data/local/tmp")
+        val fridaDeb = File(cacheDir, "frida_${arch}.deb")
+
+        log("Downloading Frida (frida-server + tools) from termux-root ($arch)...")
+        if (!downloadFridaCoreDeb(arch, fridaDeb)) {
+            AppLogger.w(TAG, "Failed to download frida deb from termux-root")
+            return false to "Failed to download Frida package. Check internet and retry."
+        }
+        log("frida deb downloaded (${fridaDeb.length()} bytes)")
+
+        log("Resolving Frida dependencies...")
+        val installOrder = collectTermuxInstallOrder(fridaDeb, arch, cacheDir)
+        if (installOrder.isEmpty()) {
+            return false to "Failed to resolve Frida packages"
+        }
+        val depCount = installOrder.size - 1
+        if (depCount > 0) log("Installing $depCount dependency package(s)...")
+
+        val mirrorTmp = "$ROOT_MIRROR_HOME/tmp"
+        Shell.cmd("mkdir -p $mirrorTmp").exec()
+
+        val debPathsOnDevice = mutableListOf<String>()
+        for (deb in installOrder) {
+            val pkg = parsePackageNameFromDeb(deb) ?: deb.nameWithoutExtension
+            if (pkg != "frida") log("  → $pkg")
+            val mirrorDeb = "$mirrorTmp/${pkg}.deb"
+            val copy = Shell.cmd(
+                "cp ${deb.absolutePath} $mirrorDeb && chmod 644 $mirrorDeb"
+            ).exec()
+            if (!copy.isSuccess) return false to "Failed to stage $pkg deb"
+            debPathsOnDevice.add(mirrorDeb)
+        }
+
+        val mergeCalls = debPathsOnDevice.mapIndexed { index, deb ->
+            val pkg = deb.substringAfterLast("/").removeSuffix(".deb")
+            """merge_termux_deb "$deb" "$ROOT_MIRROR_PREFIX" "$mirrorTmp/deb-work-$index" || { echo "Failed to merge $pkg"; exit 5; }"""
+        }.joinToString("\n")
+
+        val script = """
+            ${termuxDebMergeShellSnippet()}
+
+            export PREFIX="$ROOT_MIRROR_PREFIX"
+            export PATH="$ROOT_MIRROR_PREFIX/bin:${'$'}PATH"
+            export LD_LIBRARY_PATH="$ROOT_MIRROR_PREFIX/lib"
+
+            $mergeCalls
+
+            rm -f $mirrorTmp/*.deb 2>/dev/null || true
+
+            ${fixMirroredPrefixPathsShell()}
+
+            ${verifyRootFridaShell()}
+        """.trimIndent()
+        val result = execLongShell(script, timeoutSeconds = 600)
+        if (result.first) {
+            val cli = findRootMirroredFridaCli()
+            if (cli == null) {
+                return false to (result.second + "\nFrida CLI missing after merge — frida-python not runnable.")
+            }
+            markFridaComplete(rootFridaVersion(cli) ?: "ok")
+            stageFridaServerForRoot(log)
+        } else {
+            SetupLogger.appendShellOutput("frida merge failed", result.second)
+        }
+        return result
+    }
+
+    private suspend fun ensureRootMirrorFromTermux(
+        termuxPrefix: String,
+        log: suspend (String) -> Unit
+    ): Boolean {
+        if (isMirrorPersisted()) {
+            log("Root mirror already present — skipping Termux copy")
+            SetupLogger.append("ensureRootMirror: skip (persisted)")
+            return true
+        }
+        if (rootMirrorBashReady()) {
+            markMirrorComplete()
+            log("Root mirror present — skipping Termux copy")
+            return true
+        }
+        return mirrorTermuxPrefixToRoot(termuxPrefix, log)
+    }
+
+    private suspend fun setupFridaViaRootMirror(
+        termuxPrefix: String,
+        log: suspend (String) -> Unit
+    ): InstallResult {
+        findRootMirroredFridaCli()?.let { cli ->
+            val ver = rootFridaVersion(cli) ?: "Frida"
+            markFridaComplete(ver)
+            stageFridaServerForRoot(log)
+            return InstallResult(true, "Frida ready ($ver)", requiresReboot = false)
+        }
+
+        if (!ensureRootMirrorFromTermux(termuxPrefix, log)) {
+            return InstallResult(
+                false,
+                "Could not prepare root environment at $ROOT_MIRROR_DIR. Check root access.",
+                requiresReboot = false
+            )
+        }
+
+        findRootMirroredFridaCli()?.let { cli ->
+            val ver = rootFridaVersion(cli) ?: "Frida"
+            markFridaComplete(ver)
+            stageFridaServerForRoot(log)
+            return InstallResult(true, "Frida ready ($ver)", requiresReboot = false)
+        }
+
+        val (installOk, output) = installFridaViaDebDownload(log)
+        AppLogger.i(TAG, "Frida deb install ok=$installOk output=${output.take(2000)}")
+
+        findRootMirroredFridaCli()?.let { cli ->
+            val ver = rootFridaVersion(cli) ?: "Frida"
+            if (!stageFridaServerForRoot(log)) {
+                return InstallResult(
+                    false,
+                    "Frida installed but frida-server could not be staged for root.",
+                    requiresReboot = false
+                )
+            }
+            return InstallResult(true, "Frida installed ($ver)", requiresReboot = false)
+        }
+
+        return InstallResult(
+            success = false,
+            message = """
+Frida install failed.
+
+${output.ifBlank { "(no output)" }.take(1500)}
+
+Ensure internet is on, then try again from Settings → Status.
+            """.trimIndent(),
+            requiresReboot = false
+        )
+    }
+
     /** Root-simple Python setup: mirror Termux to /data/local/tmp, run pkg/python from there. */
     private suspend fun setupPythonViaRootMirror(
         termuxPrefix: String,
@@ -485,10 +960,19 @@ PKGEOF
         findRootMirroredPython()?.let { py ->
             val ver = rootPythonVersion(py) ?: "Python"
             applyRootPython(py)
+            markPythonComplete(ver)
             return InstallResult(true, "Python ready at $ROOT_MIRROR_DIR ($ver)", requiresReboot = false)
         }
 
-        if (!mirrorTermuxPrefixToRoot(termuxPrefix, log)) {
+        if (isPythonPersisted()) {
+            findRootMirroredPython()?.let { py ->
+                val ver = rootPythonVersion(py) ?: "Python"
+                applyRootPython(py)
+                return InstallResult(true, "Python ready ($ver)", requiresReboot = false)
+            }
+        }
+
+        if (!ensureRootMirrorFromTermux(termuxPrefix, log)) {
             return InstallResult(
                 false,
                 "Could not copy Termux files to $ROOT_MIRROR_DIR. Check root access.",
@@ -499,6 +983,7 @@ PKGEOF
         findRootMirroredPython()?.let { py ->
             val ver = rootPythonVersion(py) ?: "Python"
             applyRootPython(py)
+            markPythonComplete(ver)
             return InstallResult(true, "Python ready ($ver)", requiresReboot = false)
         }
 
@@ -508,6 +993,7 @@ PKGEOF
         findRootMirroredPython()?.let { py ->
             val ver = rootPythonVersion(py) ?: "Python"
             applyRootPython(py)
+            markPythonComplete(ver)
             return InstallResult(true, "Python installed ($ver)", requiresReboot = false)
         }
 
@@ -804,8 +1290,21 @@ Ensure internet is on, then tap Setup Python again.
         return null
     }
 
-    private fun isBootstrapInstalled(packageName: String): Boolean =
-        findBootstrappedPrefix(packageName) != null
+    private fun isBootstrapInstalled(packageName: String): Boolean {
+        val prefix = findBootstrappedPrefix(packageName)
+        if (prefix != null) {
+            if (!AppPrefs.depsTermuxBootstrapDone || !hasMarker(MARKER_BOOTSTRAP_OK)) {
+                markBootstrapComplete(packageName)
+            }
+            return true
+        }
+        if (AppPrefs.depsTermuxBootstrapDone && hasMarker(MARKER_BOOTSTRAP_OK)) {
+            SetupLogger.append("bootstrap prefs set but prefix not found — Termux data may have been cleared")
+            AppPrefs.depsTermuxBootstrapDone = false
+            Shell.cmd("rm -f '$MARKER_BOOTSTRAP_OK'").exec()
+        }
+        return false
+    }
 
     /** Applies detected Termux Python to MemoryReader for scanning. */
     private fun applyTermuxPythonToMemoryReader(
@@ -1088,8 +1587,10 @@ Ensure internet is on, then tap Setup Python again.
                     val err = java.util.ArrayList<String>()
                     val result = remote.newJob().add(script).to(out, err).exec()
                     val output = (out + err).joinToString("\n").trim()
-                    if (!result.isSuccess || output.isBlank()) {
+                    if (!result.isSuccess) {
                         AppLogger.w(TAG, "shell exit code=${result.code} success=${result.isSuccess}")
+                        SetupLogger.append("shell FAILED (exit=${result.code}, ${timeoutSeconds}s timeout)")
+                        SetupLogger.appendShellOutput("shell output", output)
                     }
                     result.isSuccess to output
                 }
@@ -1267,11 +1768,13 @@ Ensure internet is on, then tap Setup Python again.
             if (termux.isReadyForPkg) return@withLock termux
 
             if (isBootstrapInstalled(packageName)) {
-                log("Termux is already set up.")
+                log("Termux bootstrap already installed — skipping download")
+                SetupLogger.append("ensureTermuxReady: skip bootstrap (installed)")
                 return@withLock detectTermux()
             }
 
-            log("Installing Termux bootstrap (background)...")
+            SetupLogger.append("ensureTermuxReady: installing bootstrap")
+            log("Installing Termux bootstrap (one-time download)...")
             if (bootstrapTermuxFromDownload(detectTermux(), ::log)) {
                 log("Termux bootstrap installed.")
                 return@withLock detectTermux()
@@ -1394,12 +1897,27 @@ Ensure internet is on, then tap Setup Python again.
      */
     suspend fun runPythonSetup(onProgress: suspend (String) -> Unit): InstallResult = withContext(Dispatchers.IO) {
         pythonSetupMutex.withLock {
+        SetupLogger.section("Python setup")
+        val probe = probeSetupState()
+        SetupLogger.append(probe.summary)
+
         suspend fun log(msg: String) {
             AppLogger.i(TAG, msg)
+            SetupLogger.append(msg)
             withContext(Dispatchers.Main) { onProgress(msg) }
         }
 
+        log("Log: ${SetupLogger.DEVICE_LOG_PATH}")
         log("Setting up Python (root)...")
+
+        if (isPythonSetupComplete()) {
+            findRootMirroredPython()?.let { py ->
+                val ver = rootPythonVersion(py) ?: "Python"
+                applyRootPython(py)
+                log("Python already ready — skipping ($ver)")
+                return@withLock InstallResult(true, "Python ready ($ver)")
+            }
+        }
 
         // Fast path: already mirrored and working from a previous run
         findRootMirroredPython()?.let { py ->
@@ -1421,9 +1939,11 @@ Ensure internet is on, then tap Setup Python again.
 
         val packageName = termux.packageName ?: "com.termux"
 
-        if (!isBootstrapInstalled(packageName)) {
+        if (isBootstrapInstalled(packageName)) {
+            log("Termux bootstrap already installed — skipping")
+        } else {
             log("Downloading Termux base (one-time)...")
-            val ready = ensureTermuxReady(termux, ::log)
+            ensureTermuxReady(termux, ::log)
             if (!isBootstrapInstalled(packageName)) {
                 return@withLock InstallResult(
                     false,
@@ -1446,6 +1966,164 @@ Ensure internet is on, then tap Setup Python again.
             installResult
         }
         }
+    }
+
+    /**
+     * One-shot Frida setup for speed-hack fallback: Termux bootstrap + deb install into root mirror.
+     * Runs in the background; Termux app does not need to be opened.
+     */
+    suspend fun runFridaSetup(onProgress: suspend (String) -> Unit): InstallResult = withContext(Dispatchers.IO) {
+        fridaSetupMutex.withLock {
+            SetupLogger.section("Frida setup")
+            val probe = probeSetupState()
+            SetupLogger.append(probe.summary)
+
+            suspend fun progress(msg: String) {
+                AppLogger.i(TAG, msg)
+                SetupLogger.append(msg)
+                withContext(Dispatchers.Main) { onProgress(msg) }
+            }
+
+            progress("Log: ${SetupLogger.DEVICE_LOG_PATH}")
+            progress("Setting up Frida (speed hack fallback)...")
+
+            if (isFridaSetupComplete()) {
+                stageFridaServerForRoot(::progress)
+                startFridaServerShell()
+                progress("Frida already installed — skipping download")
+                return@withLock InstallResult(true, "Frida already ready")
+            }
+
+            if (isRootFridaReady()) {
+                progress("Frida already ready")
+                return@withLock InstallResult(true, "Frida already ready")
+            }
+
+            findRootMirroredFridaCli()?.let { cli ->
+                val ver = rootFridaVersion(cli) ?: "Frida"
+                stageFridaServerForRoot(::progress)
+                if (startFridaServerShell()) {
+                    progress("Frida ready: $ver")
+                    return@withLock InstallResult(true, "Frida ready ($ver)")
+                }
+            }
+
+            val termux = detectTermux()
+            progress(termux.detail)
+
+            if (!termux.packageInstalled) {
+                return@withLock InstallResult(
+                    false,
+                    "Install Termux from F-Droid (com.termux), then tap Install Frida again."
+                )
+            }
+
+            val packageName = termux.packageName ?: "com.termux"
+
+            if (isBootstrapInstalled(packageName)) {
+                progress("Termux bootstrap already installed — skipping")
+            } else {
+                progress("Downloading Termux base (one-time)...")
+                ensureTermuxReady(termux, ::progress)
+                if (!isBootstrapInstalled(packageName)) {
+                    return@withLock InstallResult(
+                        false,
+                        "Termux bootstrap failed. Check internet and root, then retry."
+                    )
+                }
+                progress("Termux base ready.")
+            }
+
+            val prefix = findBootstrappedPrefix(packageName)
+                ?: return@withLock InstallResult(false, "Termux prefix not found after bootstrap.")
+
+            val installResult = setupFridaViaRootMirror(prefix, ::progress)
+
+            if (installResult.success) {
+                progress("Starting frida-server...")
+                if (!startFridaServerShell()) {
+                    return@withLock InstallResult(
+                        false,
+                        "Frida installed but frida-server did not start. Tap Start server in Status."
+                    )
+                }
+            }
+
+            return@withLock if (isRootFridaReady()) {
+                progress("Setup complete — Frida is ready.")
+                InstallResult(true, installResult.message)
+            } else {
+                installResult
+            }
+        }
+    }
+
+    private fun isRootFridaReady(): Boolean =
+        isFridaServerProcessRunning() && findRootMirroredFridaCli() != null
+
+    private fun isFridaServerProcessRunning(): Boolean {
+        if (Shell.cmd("pgrep -f frida-server 2>/dev/null").exec().isSuccess) return true
+        return Shell.cmd(
+            "ss -ltn 2>/dev/null | grep -q ':27042' || netstat -ltn 2>/dev/null | grep -q ':27042'"
+        ).exec().isSuccess
+    }
+
+    /** Start frida-server as root with mirror libs; logs to /data/local/tmp/frida-server.log */
+    fun startFridaServerShell(): Boolean {
+        SetupLogger.append("startFridaServerShell: begin")
+        if (isFridaServerProcessRunning()) {
+            SetupLogger.append("frida-server already running")
+            return true
+        }
+
+        Shell.cmd("setenforce 0 2>/dev/null").exec()
+        Shell.cmd("pkill -9 frida-server 2>/dev/null; sleep 0.3").exec()
+
+        val server = findRootMirroredFridaServer()
+        if (server == null) {
+            SetupLogger.append("startFridaServerShell: no frida-server binary found")
+            return false
+        }
+        if (!isFridaServerElfValid(server)) {
+            SetupLogger.append("startFridaServerShell: frida-server ELF invalid at $server")
+            clearFridaMarkers()
+            return false
+        }
+
+        val wrapper = "$ROOT_MIRROR_DIR/run-frida-server.sh"
+        if (!Shell.cmd("test -x '$wrapper'").exec().isSuccess) {
+            Shell.cmd(
+                """
+                cat > '$wrapper' << 'EOF'
+#!/system/bin/sh
+export LD_LIBRARY_PATH=$ROOT_MIRROR_PREFIX/lib
+export PATH=$ROOT_MIRROR_PREFIX/bin:${'$'}PATH
+export PYTHONHOME=$ROOT_MIRROR_PREFIX
+exec '$server' -D
+EOF
+                chmod 755 '$wrapper'
+                """.trimIndent()
+            ).exec()
+        }
+
+        Shell.cmd(": > /data/local/tmp/frida-server.log").exec()
+        val start = Shell.cmd(
+            "nohup '$wrapper' >> /data/local/tmp/frida-server.log 2>&1 &"
+        ).exec()
+        SetupLogger.append("nohup start exit=${start.code}")
+
+        repeat(8) { attempt ->
+            Thread.sleep(500)
+            if (isFridaServerProcessRunning()) {
+                SetupLogger.append("frida-server running (attempt ${attempt + 1})")
+                return true
+            }
+        }
+
+        val logTail = Shell.cmd("tail -20 /data/local/tmp/frida-server.log 2>/dev/null").exec()
+            .out.joinToString("\n")
+        SetupLogger.appendShellOutput("frida-server.log", logTail)
+        return false
     }
 
     /** Ask Termux app to run a command in its own process (enable "Allow external apps" in Termux). */

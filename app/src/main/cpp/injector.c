@@ -10,6 +10,7 @@
 #include <sys/uio.h>
 #include <sys/syscall.h>
 #include <dirent.h>
+#include <stdatomic.h>
 
 #ifndef __NR_process_vm_writev
 #if defined(__aarch64__)
@@ -36,8 +37,10 @@ static ssize_t process_vm_writev_wrapper(pid_t pid,
 #include <signal.h>
 #include <elf.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 #define LOG_TAG "SpeedInjector"
+#define INJECTOR_BUILD __DATE__ " " __TIME__
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
@@ -69,11 +72,48 @@ struct pt_regs_arm64 {
     unsigned long long pstate;
 };
 
-static void out(const char *msg) {
-    fputs(msg, stdout);
+static void inject_emit(int use_error, const char *prefix, const char *body) {
+    char line[512];
+    snprintf(line, sizeof(line), "%s%s", prefix, body);
+    fputs(line, stdout);
     fputc('\n', stdout);
     fflush(stdout);
-    LOGI("%s", msg);
+    if (use_error) LOGE("%s", line);
+    else LOGI("%s", line);
+}
+
+static void out(const char *msg) {
+    inject_emit(0, "", msg);
+}
+
+static void inject_dbg(const char *fmt, ...) {
+    char body[464];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    inject_emit(0, "ANDROCE_DBG: ", body);
+}
+
+static void inject_err(const char *fmt, ...) {
+    char body[464];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    inject_emit(1, "ANDROCE_DBG: ", body);
+}
+
+static void inject_fail(const char *fmt, ...) {
+    char body[400];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    inject_emit(1, "ANDROCE_DBG: ", body);
+    char line[512];
+    snprintf(line, sizeof(line), "ANDROCE_INJECT: FAIL %s", body);
+    inject_emit(1, "", line);
 }
 
 static int remote_write(int pid, unsigned long addr, const void *buf, size_t len) {
@@ -181,11 +221,13 @@ enum dlopen_kind {
     REMOTE_MMAP_6ARG = 3,
     REMOTE_MEMFD_2ARG = 4,
     DLOPEN_ANDROID_EXT_3ARG = 5,
+    REMOTE_MPROTECT_3ARG = 6,
 };
 
 /* bionic android_dlextinfo (API 29+) */
 #define ANDROID_DLEXT_USE_LIBRARY_FD 0x10
-#define ANDROID_DLEXT_FORCE_LOAD     0x80
+#define ANDROID_DLEXT_FORCE_LOAD     0x40
+#define ANDROID_DLEXT_RESERVED_ADDRESS 0x01
 struct android_dlextinfo_memfd {
     uint64_t flags;
     void *reserved_addr;
@@ -198,8 +240,16 @@ struct android_dlextinfo_memfd {
 
 #define REMOTE_CALL_TIMEOUT_MS 8000
 #define REMOTE_CALL_POLL_MS    50
-#define INJECT_PAGE_SIZE       4096
 #define INJECT_PATH_OFF        0x40
+#define MEMFD_SCRATCH_NAME_OFF 0x00
+#define MEMFD_SCRATCH_FD_OFF   0x200
+
+static size_t get_page_size(void) {
+    long ps = sysconf(_SC_PAGESIZE);
+    size_t result = ps > 0 ? (size_t)ps : 4096;
+    LOGI("Page size detected: %zu bytes", result);
+    return result;
+}
 
 struct dlopen_target {
     unsigned long addr;
@@ -228,30 +278,159 @@ static unsigned long find_map_base(int pid, const char *lib_substr, const char *
     return base;
 }
 
-/** Valid caller PC for __loader_dlopen — must lie inside a loaded module (app or libdl). */
-static unsigned long resolve_loader_caller(int pid) {
-    unsigned long caller = find_sym_in_maps(pid, "libdl.so", "dlopen");
-    if (!caller) caller = find_sym_in_maps(pid, "libdl.so", "android_dlopen_ext");
-    if (!caller) caller = find_sym_in_maps(pid, "libc.so", "malloc");
+/* Largest anonymous RW mapping — safe scratch (not live heap objects at base). */
+static unsigned long find_anon_rw_region(int pid, size_t size_needed, unsigned long *out_size) {
+    char maps_path[64];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *fp = fopen(maps_path, "r");
+    if (!fp) return 0;
 
-    if (!caller) {
-        char maps_path[64];
-        snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
-        FILE *fp = fopen(maps_path, "r");
-        if (fp) {
-            char line[512];
-            while (fgets(line, sizeof(line), fp)) {
-                if (!strstr(line, "r-xp")) continue;
-                if (!strstr(line, "/data/app/") && !strstr(line, "/data/data/")) continue;
-                if (!strstr(line, ".apk") && !strstr(line, "base.odex")) continue;
-                unsigned long start = 0;
-                if (sscanf(line, "%lx-", &start) == 1 && start) {
-                    caller = start + 0x1000;
-                    break;
-                }
-            }
-            fclose(fp);
+    char line[512];
+    unsigned long best = 0;
+    unsigned long best_size = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long start = 0, end = 0;
+        char perms[8];
+        char path[256] = {0};
+        int n = sscanf(line, "%lx-%lx %4s %*s %*s %*s %255s", &start, &end, perms, path);
+        unsigned long size = end - start;
+        if (size < size_needed) continue;
+        if (perms[0] != 'r' || perms[1] != 'w') continue;
+        int is_anon = (n < 4) || path[0] == '\0' || path[0] == '[';
+        if (!is_anon) continue;
+        if (size > best_size) {
+            best = start;
+            best_size = size;
         }
+    }
+    fclose(fp);
+    if (out_size) *out_size = best_size;
+    return best;
+}
+
+static unsigned long scratch_addr_at_tail(unsigned long base, unsigned long region_size, size_t len) {
+    if (region_size < len + 0x100) return 0;
+    unsigned long off = region_size - len;
+    off &= ~7ULL;
+    return base + off;
+}
+
+static unsigned long ptr_untag(unsigned long p) {
+    return p & 0x00FFFFFFFFFFFFFFULL;
+}
+
+static unsigned long ptr_tag_from(unsigned long tagged_ref) {
+    return tagged_ref & 0xFF00000000000000ULL;
+}
+
+static unsigned long ptr_tagged(unsigned long addr, unsigned long tag_ref) {
+    unsigned long u = ptr_untag(addr);
+    if (!u) return 0;
+    return u | ptr_tag_from(tag_ref);
+}
+
+static unsigned long tag_remote_ptr(unsigned long addr, unsigned long tag_ref) {
+    if (!addr) return 0;
+    if (addr & 0xFF00000000000000ULL) return addr;
+    return ptr_tagged(addr, tag_ref);
+}
+
+/* Write to process memory via /proc/pid/mem (alternative to process_vm_writev) */
+static int proc_mem_write(int pid, unsigned long addr, const void *data, size_t len) {
+    char mem_path[64];
+    snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
+    
+    int fd = open(mem_path, O_WRONLY);
+    if (fd < 0) {
+        LOGE("Failed to open %s: %s", mem_path, strerror(errno));
+        return -1;
+    }
+    
+    if (lseek(fd, addr, SEEK_SET) < 0) {
+        LOGE("Failed to seek in %s: %s", mem_path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    
+    ssize_t written = write(fd, data, len);
+    close(fd);
+    
+    if (written != (ssize_t)len) {
+        LOGE("Failed to write to %s: wrote %zd of %zu bytes", mem_path, written, len);
+        return -1;
+    }
+    
+    return 0;
+}
+
+static int pc_in_app_rx_map(int pid, unsigned long pc) {
+    if (!pc) return 0;
+    char maps_path[64];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *fp = fopen(maps_path, "r");
+    if (!fp) return 0;
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (!strstr(line, "r-xp")) continue;
+        if (!strstr(line, "/data/app/") && !strstr(line, "/data/data/")) continue;
+        unsigned long start = 0, end = 0;
+        if (sscanf(line, "%lx-%lx", &start, &end) == 2 && pc >= start && pc < end) {
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+    return found;
+}
+
+/** Caller PC for __loader_dlopen — must be inside app/game executable code. */
+static unsigned long resolve_loader_caller(int pid) {
+    static const char *game_libs[] = {
+        "libil2cpp.so", "libunity.so", "libmain.so", "libgame.so", "libUE4.so", NULL
+    };
+    for (int i = 0; game_libs[i]; i++) {
+        unsigned long sym = find_sym_in_maps(pid, game_libs[i], "JNI_OnLoad");
+        if (sym) return sym;
+    }
+
+    char maps_path[64];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *fp = fopen(maps_path, "r");
+    if (!fp) return 0;
+
+    char line[512];
+    unsigned long caller = 0;
+    unsigned long best_start = 0;
+    unsigned long best_size = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        if (!strstr(line, "r-xp")) continue;
+        if (!strstr(line, "/data/app/") && !strstr(line, "/data/data/")) continue;
+
+        unsigned long start = 0, end = 0, pgoff = 0;
+        char path[256] = {0};
+        if (sscanf(line, "%lx-%lx %*s %lx %*s %*s %255s", &start, &end, &pgoff, path) < 3)
+            continue;
+
+        unsigned long size = end - start;
+        if (path[0] != '\0' && (strstr(path, "/lib/arm64/") || strstr(path, "/lib/arm/"))) {
+            if (size > best_size) {
+                best_size = size;
+                best_start = start;
+                caller = start + (pgoff ? pgoff : 0x1000) + 0x4000;
+            }
+        }
+        if (!caller && size > best_size) {
+            best_size = size;
+            best_start = start;
+            caller = start + (pgoff ? pgoff : 0x1000) + 0x8000;
+        }
+    }
+    fclose(fp);
+    if (!caller && best_start) {
+        caller = best_start + 0x10000;
     }
     return caller;
 }
@@ -262,11 +441,11 @@ static int resolve_dlopen_candidate(int pid, int index, struct dlopen_target *ou
         const char *sym;
         enum dlopen_kind kind;
     } candidates[] = {
-        { "linker64", "__loader_dlopen", DLOPEN_LOADER_3ARG },
-        { "linker", "__loader_dlopen", DLOPEN_LOADER_3ARG },
-        { "libdl.so", "android_dlopen_ext", DLOPEN_ANDROID_EXT_3ARG },
         { "libdl.so", "dlopen", DLOPEN_2ARG },
         { "libc.so", "dlopen", DLOPEN_2ARG },
+        { "libc.so", "__dl_dlopen", DLOPEN_2ARG },
+        { "linker64", "__loader_dlopen", DLOPEN_LOADER_3ARG },
+        { "linker", "__loader_dlopen", DLOPEN_LOADER_3ARG },
         { NULL, NULL, DLOPEN_2ARG }
     };
 
@@ -292,35 +471,6 @@ static struct dlopen_target resolve_dlopen(int pid) {
     struct dlopen_target target = {0};
     resolve_dlopen_candidate(pid, 0, &target);
     return target;
-}
-
-static unsigned long find_rw_region(int pid, unsigned long *out_size) {
-    char maps_path[64];
-    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
-    FILE *fp = fopen(maps_path, "r");
-    if (!fp) return 0;
-
-    char line[512];
-    unsigned long best = 0;
-    unsigned long best_size = 0;
-
-    while (fgets(line, sizeof(line), fp)) {
-        unsigned long start, end;
-        char perms[8];
-        char path[256] = {0};
-        int n = sscanf(line, "%lx-%lx %4s %*s %*s %*s %255s", &start, &end, perms, path);
-        unsigned long size = end - start;
-        if (size < 4096) continue;
-        if (perms[0] != 'r' || perms[1] != 'w') continue;
-        int is_anon = (n < 4) || path[0] == '\0' || path[0] == '[';
-        if (is_anon && size > best_size) {
-            best = start;
-            best_size = size;
-        }
-    }
-    fclose(fp);
-    *out_size = best_size;
-    return best;
 }
 
 static int is_plausible_dlopen_handle(unsigned long long h) {
@@ -538,12 +688,29 @@ static void ptrace_release_other_thread(int tid, int status);
 static int arm64_remote_call(int tid, const struct dlopen_target *target,
                              unsigned long path_addr, unsigned long stop_pc,
                              unsigned long long *out_x0, const char *method_tag) {
+    static atomic_size_t cached_page_size = 0;
+    size_t page_size = atomic_load(&cached_page_size);
+    if (page_size == 0) {
+        size_t new_size = get_page_size();
+        size_t expected = 0;
+        if (atomic_compare_exchange_strong(&cached_page_size, &expected, new_size)) {
+            page_size = new_size;
+        } else {
+            page_size = expected;
+        }
+    }
+
     struct pt_regs_arm64 orig_regs, new_regs, result_regs;
     struct iovec iov = { &orig_regs, sizeof(orig_regs) };
     if (ptrace(PTRACE_GETREGSET, tid, (void *)(long)NT_PRSTATUS, &iov) < 0) {
-        LOGE("PTRACE_GETREGSET(%s): %s", method_tag, strerror(errno));
+        inject_err("GETREGSET %s: %s", method_tag, strerror(errno));
         return -1;
     }
+
+    unsigned long tag_ref = orig_regs.sp;
+    inject_dbg("call %s fn=0x%lx kind=%d path=0x%lx stop=0x%lx sp=0x%lx tag=0x%lx",
+               method_tag, target->addr, (int)target->kind, path_addr, stop_pc,
+               (unsigned long)orig_regs.sp, ptr_tag_from(tag_ref));
 
     new_regs = orig_regs;
     new_regs.pc = target->addr;
@@ -551,31 +718,36 @@ static int arm64_remote_call(int tid, const struct dlopen_target *target,
         /* Stub sets x0/x1/x17 from literals in the RX page. */
     } else if (target->kind == REMOTE_MMAP_6ARG) {
         new_regs.regs[0] = 0;
-        new_regs.regs[1] = INJECT_PAGE_SIZE;
-        new_regs.regs[2] = 7; /* PROT_READ|WRITE|EXEC */
+        new_regs.regs[1] = page_size;
+        new_regs.regs[2] = 3; /* PROT_READ|WRITE (add EXEC later with mprotect) */
         new_regs.regs[3] = 0x22; /* MAP_PRIVATE|MAP_ANONYMOUS */
         new_regs.regs[4] = (unsigned long)-1;
         new_regs.regs[5] = 0;
+    } else if (target->kind == REMOTE_MPROTECT_3ARG) {
+        new_regs.regs[0] = tag_remote_ptr(path_addr, tag_ref);
+        new_regs.regs[1] = page_size;
+        new_regs.regs[2] = 7; /* PROT_READ|WRITE|EXEC */
     } else if (target->kind == REMOTE_MEMFD_2ARG) {
-        new_regs.regs[0] = path_addr;
+        new_regs.regs[0] = tag_remote_ptr(path_addr, tag_ref);
         new_regs.regs[1] = 1; /* MFD_CLOEXEC */
     } else if (target->kind == DLOPEN_ANDROID_EXT_3ARG) {
-        new_regs.regs[0] = 0;
+        new_regs.regs[0] = tag_remote_ptr(path_addr, tag_ref);
         new_regs.regs[1] = RTLD_NOW;
-        new_regs.regs[2] = path_addr; /* &android_dlextinfo in target memory */
+        new_regs.regs[2] = tag_remote_ptr(target->caller_addr, tag_ref);
     } else {
-        new_regs.regs[0] = path_addr;
+        new_regs.regs[0] = tag_remote_ptr(path_addr, tag_ref);
         new_regs.regs[1] = RTLD_NOW;
-        new_regs.regs[2] = (target->kind == DLOPEN_LOADER_3ARG) ? target->caller_addr : 0;
+        new_regs.regs[2] = (target->kind == DLOPEN_LOADER_3ARG)
+            ? tag_remote_ptr(target->caller_addr, tag_ref) : 0;
     }
-    new_regs.regs[30] = stop_pc;
+    new_regs.regs[30] = tag_remote_ptr(stop_pc, tag_ref);
     new_regs.pstate &= ~0x20ULL;
     if (new_regs.sp < 0x1000) new_regs.sp = orig_regs.sp;
     new_regs.sp = (new_regs.sp & ~0xFULL) - 0x80;
 
     iov.iov_base = &new_regs;
     if (ptrace(PTRACE_SETREGSET, tid, (void *)(long)NT_PRSTATUS, &iov) < 0) {
-        LOGE("PTRACE_SETREGSET(%s): %s", method_tag, strerror(errno));
+        inject_err("SETREGSET %s: %s", method_tag, strerror(errno));
         return -1;
     }
 
@@ -598,7 +770,7 @@ retry_wait:
                 break;
             }
         } else if (w < 0 && errno != ECHILD) {
-            LOGE("waitpid(%s): %s", method_tag, strerror(errno));
+            inject_err("waitpid %s: %s", method_tag, strerror(errno));
             iov.iov_base = &orig_regs;
             ptrace(PTRACE_SETREGSET, tid, (void *)(long)NT_PRSTATUS, &iov);
             return -1;
@@ -607,7 +779,7 @@ retry_wait:
         waited += REMOTE_CALL_POLL_MS;
     }
     if (w != tid) {
-        LOGE("Remote dlopen timed out (%s) after %dms", method_tag, REMOTE_CALL_TIMEOUT_MS);
+        inject_err("timeout %s after %dms", method_tag, REMOTE_CALL_TIMEOUT_MS);
         ptrace(PTRACE_INTERRUPT, tid, NULL, NULL);
         (void)waitpid(-1, &status, __WALL | WUNTRACED);
         iov.iov_base = &orig_regs;
@@ -621,37 +793,60 @@ retry_wait:
 
     if (WIFSTOPPED(status)) {
         int sig = WSTOPSIG(status);
-        unsigned long brk_pc = target->addr + 0x10U;
-        int is_brk_stop = (sig == SIGILL && result_regs.pc == brk_pc);
+        unsigned long pc_u = ptr_untag(result_regs.pc);
+        unsigned long stop_u = ptr_untag(stop_pc);
+        unsigned long sc_brk_u = (target->kind == DLOPEN_SHELLCODE)
+            ? ptr_untag(target->addr) + 0x10U : 0;
+        int stopped_at_ret = (pc_u == stop_u);
+        int stopped_at_sc_brk = (sc_brk_u && pc_u == sc_brk_u);
+        int is_expected_stop = stopped_at_ret || stopped_at_sc_brk;
 
-        if ((sig == SIGSEGV || sig == SIGBUS || sig == SIGILL) && !is_brk_stop) {
-            LOGE("Remote dlopen crashed (%s) sig=%d pc=0x%llx x0=0x%llx", method_tag, sig,
-                 (unsigned long long)result_regs.pc,
-                 (unsigned long long)result_regs.regs[0]);
+        if ((sig == SIGSEGV || sig == SIGBUS) ||
+            (sig == SIGILL && !is_expected_stop)) {
+            inject_err("crash %s sig=%d pc=0x%llx x0=0x%llx lr=0x%llx stop=0x%llx", method_tag, sig,
+                       (unsigned long long)result_regs.pc,
+                       (unsigned long long)result_regs.regs[0],
+                       (unsigned long long)result_regs.regs[30],
+                       (unsigned long long)stop_pc);
             iov.iov_base = &orig_regs;
             ptrace(PTRACE_SETREGSET, tid, (void *)(long)NT_PRSTATUS, &iov);
             return -1;
         }
-        if (sig != SIGTRAP && sig != SIGSTOP && !is_brk_stop) {
-            LOGI("Suppressing signal %d on inject tid during remote call (%s)", sig, method_tag);
+        if (!is_expected_stop && sig != SIGTRAP && sig != SIGSTOP) {
+            inject_dbg("signal %d suppressed during %s pc=0x%llx", sig, method_tag,
+                       (unsigned long long)result_regs.pc);
             ptrace(PTRACE_CONT, tid, NULL, (void *)0);
             w = 0;
             goto retry_wait;
         }
+        if (is_expected_stop) {
+            inject_dbg("stop %s at pc=0x%llx sig=%d x0=0x%llx", method_tag,
+                       (unsigned long long)result_regs.pc, sig,
+                       (unsigned long long)result_regs.regs[0]);
+        }
     }
 
     if (out_x0) *out_x0 = result_regs.regs[0];
-    LOGI("Remote call (%s) returned: x0=0x%llx pc=0x%llx", method_tag,
-         (unsigned long long)result_regs.regs[0],
-         (unsigned long long)result_regs.pc);
+    inject_dbg("return %s x0=0x%llx pc=0x%llx", method_tag,
+               (unsigned long long)result_regs.regs[0],
+               (unsigned long long)result_regs.pc);
 
     iov.iov_base = &orig_regs;
     ptrace(PTRACE_SETREGSET, tid, (void *)(long)NT_PRSTATUS, &iov);
 
     if (target->kind == REMOTE_MMAP_6ARG) {
         if (result_regs.regs[0] < 0x10000ULL) {
-            LOGE("Remote mmap (%s) failed x0=0x%llx", method_tag,
-                 (unsigned long long)result_regs.regs[0]);
+            inject_err("mmap %s bad x0=0x%llx", method_tag,
+                       (unsigned long long)result_regs.regs[0]);
+            return -1;
+        }
+        return 0;
+    }
+
+    if (target->kind == REMOTE_MPROTECT_3ARG) {
+        if ((long long)result_regs.regs[0] < 0) {
+            inject_err("mprotect %s errno x0=0x%llx", method_tag,
+                       (unsigned long long)result_regs.regs[0]);
             return -1;
         }
         return 0;
@@ -659,8 +854,8 @@ retry_wait:
 
     if (target->kind == REMOTE_MEMFD_2ARG) {
         if ((long long)result_regs.regs[0] < 0) {
-            LOGE("Remote memfd_create (%s) failed x0=0x%llx", method_tag,
-                 (unsigned long long)result_regs.regs[0]);
+            inject_err("memfd_create %s errno x0=0x%llx", method_tag,
+                       (unsigned long long)result_regs.regs[0]);
             return -1;
         }
         return 0;
@@ -670,45 +865,29 @@ retry_wait:
         return 0;
     }
 
-    if ((long long)result_regs.regs[0] < 0) {
-        LOGE("Remote call (%s) errno x0=0x%llx", method_tag,
-             (unsigned long long)result_regs.regs[0]);
+    if (result_regs.regs[0] == 0) {
+        inject_fail("dlopen %s returned NULL", method_tag);
         return -1;
     }
 
-    if (result_regs.regs[0] == 0) {
-        LOGE("Remote dlopen (%s) returned NULL", method_tag);
+    if ((long long)result_regs.regs[0] < 0) {
+        inject_fail("dlopen %s errno x0=0x%llx", method_tag,
+                    (unsigned long long)result_regs.regs[0]);
         return -1;
     }
 
     if (!is_plausible_dlopen_handle(result_regs.regs[0])) {
-        LOGI("Remote dlopen (%s) nonstandard x0=0x%llx (may still succeed)", method_tag,
-             (unsigned long long)result_regs.regs[0]);
+        inject_fail("dlopen %s invalid handle x0=0x%llx", method_tag,
+                    (unsigned long long)result_regs.regs[0]);
+        return -1;
     }
 
     return 0;
 }
 
-static int build_dlopen_stub(unsigned char *page, unsigned long page_addr,
-                             unsigned long dlopen_addr, const char *lib_path) {
-    memset(page, 0, INJECT_PAGE_SIZE);
-    uint32_t *sc = (uint32_t *)page;
-    sc[0] = 0x580000e0U; /* ldr x0, #0x1c -> path ptr (offset 28 bytes = 7*4) */
-    sc[1] = 0x52800041U; /* mov w1, #RTLD_NOW */
-    sc[2] = 0x58000031U; /* ldr x17, [pc+0x0c] -> dlopen @ 0x14 (imm19=3, Rt=17) */
-    sc[3] = 0xd63f0220U; /* blr x17 */
-    sc[4] = 0xd4200000U; /* brk #0 */
-    memcpy(page + 0x14, &dlopen_addr, sizeof(dlopen_addr));
-
-    unsigned long path_ptr = page_addr + INJECT_PATH_OFF;
-    memcpy(page + 0x1c, &path_ptr, sizeof(path_ptr));
-    size_t path_len = strlen(lib_path) + 1;
-    if (INJECT_PATH_OFF + path_len >= INJECT_PAGE_SIZE) return -1;
-    memcpy(page + INJECT_PATH_OFF, lib_path, path_len);
-    return 0;
-}
-
 static int arm64_prepare_path(int pid, const char *lib_path, unsigned long *path_addr_out);
+static int arm64_prepare_path_ex(int pid, int tid, unsigned long stop_pc,
+                                 const char *lib_path, unsigned long *path_addr_out);
 
 static int arm64_try_direct_dlopen(int tid, const struct dlopen_target *target,
                                    unsigned long path_addr, unsigned long stop_pc,
@@ -726,15 +905,16 @@ static void patch_loader_caller(int pid, int tid, struct dlopen_target *target) 
         target->caller_addr = resolve_loader_caller(pid);
         return;
     }
-    if (regs.pc) {
+    target->caller_addr = resolve_loader_caller(pid);
+    if (regs.pc && pc_in_app_rx_map(pid, regs.pc)) {
         target->caller_addr = regs.pc;
-    } else if (regs.regs[30]) {
+    } else if (regs.regs[30] && pc_in_app_rx_map(pid, regs.regs[30])) {
         target->caller_addr = regs.regs[30];
-    } else {
+    }
+    if (!target->caller_addr) {
         target->caller_addr = resolve_loader_caller(pid);
     }
-    snprintf(msg, sizeof(msg), "ANDROCE_INJECT: caller=0x%lx", target->caller_addr);
-    out(msg);
+    inject_dbg("loader caller=0x%lx", target->caller_addr);
 }
 
 /* Load library from memfd — bypasses linker namespace path restrictions (Android 10+). */
@@ -775,7 +955,25 @@ static int inject_via_memfd(int pid, int tid, unsigned long stop_pc, const char 
     }
     fclose(fp);
 
-    if (remote_write(pid, scratch_addr, "libspeedhook.so", 16) < 0) {
+    struct pt_regs_arm64 regs;
+    struct iovec iov = { &regs, sizeof(regs) };
+    if (ptrace(PTRACE_GETREGSET, tid, (void *)(long)NT_PRSTATUS, &iov) != 0) {
+        free(lib_buf);
+        out("ANDROCE_INJECT: memfd FAIL read thread regs");
+        return -1;
+    }
+    unsigned long sp = ptr_untag(regs.sp) & ~0xFULL;
+    if (sp < 0x800) {
+        free(lib_buf);
+        out("ANDROCE_INJECT: memfd FAIL invalid stack pointer");
+        return -1;
+    }
+    unsigned long name_u = sp - 0x100;
+    unsigned long fdpath_u = sp - 0x200;
+    inject_dbg("memfd stack name=0x%lx fdpath=0x%lx tag=0x%lx", name_u, fdpath_u,
+               ptr_tag_from(regs.sp));
+
+    if (remote_write(pid, name_u, "libspeedhook.so", 16) < 0) {
         free(lib_buf);
         out("ANDROCE_INJECT: memfd FAIL write name");
         return -1;
@@ -785,7 +983,7 @@ static int inject_via_memfd(int pid, int tid, unsigned long stop_pc, const char 
 
     struct dlopen_target memfd_target = { .addr = memfd_fn, .kind = REMOTE_MEMFD_2ARG };
     unsigned long long remote_fd = 0;
-    if (arm64_remote_call(tid, &memfd_target, scratch_addr, stop_pc, &remote_fd, "memfd") != 0) {
+    if (arm64_remote_call(tid, &memfd_target, name_u, stop_pc, &remote_fd, "memfd") != 0) {
         free(lib_buf);
         out("ANDROCE_INJECT: memfd FAIL memfd_create call");
         return -1;
@@ -822,7 +1020,7 @@ static int inject_via_memfd(int pid, int tid, unsigned long stop_pc, const char 
 
     char fd_path[64];
     snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", (int)remote_fd);
-    if (remote_write(pid, scratch_addr, fd_path, strlen(fd_path) + 1) < 0) {
+    if (remote_write(pid, fdpath_u, fd_path, strlen(fd_path) + 1) < 0) {
         out("ANDROCE_INJECT: memfd FAIL write fd path");
         return -1;
     }
@@ -830,7 +1028,7 @@ static int inject_via_memfd(int pid, int tid, unsigned long stop_pc, const char 
     if (loader_target && loader_target->addr) {
         unsigned long long ret = 0;
         out("ANDROCE_INJECT: memfd try /proc/self/fd path");
-        if (arm64_try_direct_dlopen(tid, loader_target, scratch_addr, stop_pc, &ret, "memfd_fd") == 0 &&
+        if (arm64_try_direct_dlopen(tid, loader_target, fdpath_u, stop_pc, &ret, "memfd_fd") == 0 &&
             is_lib_loaded(pid, "libspeedhook")) {
             return 0;
         }
@@ -861,15 +1059,25 @@ static int inject_via_memfd(int pid, int tid, unsigned long stop_pc, const char 
     memset(&ext, 0, sizeof(ext));
     ext.flags = ANDROID_DLEXT_USE_LIBRARY_FD | ANDROID_DLEXT_FORCE_LOAD;
     ext.library_fd = (int)remote_fd;
-    if (remote_write(pid, (unsigned long)remote_page, &ext, sizeof(ext)) < 0) {
+    unsigned long ext_addr = (unsigned long)remote_page;
+    unsigned long ext_name_addr = ext_addr + 0x100;
+    if (remote_write(pid, ext_addr, &ext, sizeof(ext)) < 0) {
         out("ANDROCE_INJECT: memfd FAIL write extinfo");
+        return -1;
+    }
+    if (remote_write(pid, ext_name_addr, "libspeedhook.so", 16) < 0) {
+        out("ANDROCE_INJECT: memfd FAIL write ext filename");
         return -1;
     }
 
     out("ANDROCE_INJECT: memfd try android_dlopen_ext");
-    struct dlopen_target ext_target = { .addr = dlopen_ext, .kind = DLOPEN_ANDROID_EXT_3ARG };
+    struct dlopen_target ext_target = {
+        .addr = dlopen_ext,
+        .kind = DLOPEN_ANDROID_EXT_3ARG,
+        .caller_addr = ext_addr,
+    };
     unsigned long long handle = 0;
-    if (arm64_remote_call(tid, &ext_target, (unsigned long)remote_page, stop_pc, &handle, "dlopen_ext") != 0) {
+    if (arm64_remote_call(tid, &ext_target, ext_name_addr, stop_pc, &handle, "dlopen_ext") != 0) {
         out("ANDROCE_INJECT: memfd FAIL android_dlopen_ext call");
         return -1;
     }
@@ -881,34 +1089,82 @@ static int inject_via_memfd(int pid, int tid, unsigned long stop_pc, const char 
 }
 
 static int inject_via_mmap_page(int pid, int tid, unsigned long stop_pc, const char *lib_path) {
+    LOGI("=== MMAP PAGE INJECTION ===");
+    static atomic_size_t cached_page_size = 0;
+    size_t page_size = atomic_load(&cached_page_size);
+    if (page_size == 0) {
+        size_t new_size = get_page_size();
+        size_t expected = 0;
+        if (atomic_compare_exchange_strong(&cached_page_size, &expected, new_size)) {
+            page_size = new_size;
+        } else {
+            page_size = expected;
+        }
+    }
+    LOGI("Using page size: %zu bytes", page_size);
+
     unsigned long mmap_addr = find_sym_in_maps(pid, "libc.so", "mmap");
     if (!mmap_addr) mmap_addr = find_sym_in_maps(pid, "libc.so", "mmap64");
     if (!mmap_addr) {
-        LOGE("mmap symbol not found");
+        LOGE("mmap symbol not found in target process");
         return -1;
     }
+    LOGI("Found mmap at 0x%lx in target", mmap_addr);
 
     struct dlopen_target mmap_fn = { .addr = mmap_addr, .kind = REMOTE_MMAP_6ARG };
     unsigned long long remote_page = 0;
     if (arm64_remote_call(tid, &mmap_fn, 0, stop_pc, &remote_page, "mmap") != 0) {
+        LOGE("Remote mmap call failed");
         return -1;
+    }
+
+    if (remote_page == 0 || remote_page < 0x10000ULL) {
+        LOGE("Remote mmap returned invalid address: x0=0x%llx - Android 15 may block remote mmap", remote_page);
+        LOGE("Skipping mmap injection, trying direct dlopen fallback");
+        return -2; /* Special return code to skip mmap but continue with other methods */
     }
 
     unsigned long path_in_target = (unsigned long)remote_page + INJECT_PATH_OFF;
     size_t path_len = strlen(lib_path) + 1;
-    if (INJECT_PATH_OFF + path_len >= INJECT_PAGE_SIZE) {
+    if (INJECT_PATH_OFF + path_len >= page_size) {
         LOGE("library path too long for inject page");
         return -1;
     }
 
-    unsigned char page[INJECT_PAGE_SIZE];
-    memset(page, 0, sizeof(page));
+    unsigned char *page = calloc(1, page_size);
+    if (!page) {
+        LOGE("failed to allocate inject page buffer");
+        return -1;
+    }
     memcpy(page + INJECT_PATH_OFF, lib_path, path_len);
-    if (remote_write(pid, (unsigned long)remote_page, page, INJECT_PAGE_SIZE) < 0) {
+    int write_result = remote_write(pid, (unsigned long)remote_page, page, page_size);
+    free(page);
+    if (write_result < 0) {
         LOGE("failed to write inject page");
         return -1;
     }
 
+    // Add PROT_EXEC using remote mprotect (Android 15 W^X policy)
+    unsigned long mprotect_addr = find_sym_in_maps(pid, "libc.so", "mprotect");
+    if (!mprotect_addr) {
+        LOGE("mprotect symbol not found in target process");
+        return -1;
+    }
+    LOGI("Found mprotect at 0x%lx in target", mprotect_addr);
+    LOGI("Adding PROT_EXEC to 0x%lx (size %zu)", (unsigned long)remote_page, page_size);
+    struct dlopen_target mprotect_fn = { .addr = mprotect_addr, .kind = REMOTE_MPROTECT_3ARG };
+    unsigned long long mprotect_ret = 0;
+    if (arm64_remote_call(tid, &mprotect_fn, (unsigned long)remote_page, stop_pc, &mprotect_ret, "mprotect") != 0) {
+        LOGE("Remote mprotect call failed");
+        return -1;
+    }
+    if (mprotect_ret != 0) {
+        LOGE("Remote mprotect failed with error: x0=0x%llx", mprotect_ret);
+        return -1;
+    }
+    LOGI("Remote mprotect succeeded");
+
+    LOGI("Trying dlopen via mmap page (candidates 0-7)");
     unsigned long last_addr = 0;
     for (int ci = 0; ci < 8; ci++) {
         struct dlopen_target cand;
@@ -917,15 +1173,20 @@ static int inject_via_mmap_page(int pid, int tid, unsigned long stop_pc, const c
         last_addr = cand.addr;
         patch_loader_caller(pid, tid, &cand);
 
+        LOGI("Trying candidate %d: kind=%d addr=0x%lx", ci, cand.kind, cand.addr);
         unsigned long long ret = 0;
         if (arm64_remote_call(tid, &cand, path_in_target, stop_pc, &ret, "mmap_dlopen") != 0) {
+            LOGI("Candidate %d remote call failed", ci);
             continue;
         }
+        LOGI("Candidate %d returned x0=0x%llx", ci, ret);
         if (is_lib_loaded(pid, "libspeedhook")) {
+            LOGI("Library loaded via candidate %d", ci);
             return 0;
         }
     }
 
+    LOGI("All mmap dlopen candidates failed");
     return -1;
 }
 
@@ -943,20 +1204,50 @@ static unsigned long get_stop_pc(int pid) {
 }
 
 static int arm64_prepare_path(int pid, const char *lib_path, unsigned long *path_addr_out) {
+    size_t path_len = strlen(lib_path) + 1;
     unsigned long region_size = 0;
-    unsigned long region = find_rw_region(pid, &region_size);
-    if (!region || region_size < 512) {
-        LOGE("No suitable RW region");
+    unsigned long region = find_anon_rw_region(pid, path_len + 0x100, &region_size);
+    if (!region) {
+        LOGE("No suitable anonymous RW region found");
         return -1;
     }
 
-    size_t path_len = strlen(lib_path) + 1;
-    if (remote_write(pid, region, lib_path, path_len) < 0) {
-        LOGE("Failed to write library path");
+    unsigned long addr = scratch_addr_at_tail(region, region_size, path_len);
+    if (!addr) {
+        LOGE("Anonymous RW region too small for path (%zu bytes)", path_len);
         return -1;
     }
-    *path_addr_out = region;
+    LOGI("Writing library path (%zu bytes) to anon scratch 0x%lx", path_len, addr);
+    if (remote_write(pid, addr, lib_path, path_len) < 0) {
+        LOGE("Failed to write library path to target memory");
+        return -1;
+    }
+    *path_addr_out = addr;
     return 0;
+}
+
+static int arm64_prepare_path_ex(int pid, int tid, unsigned long stop_pc,
+                                 const char *lib_path, unsigned long *path_addr_out) {
+    (void)stop_pc;
+    size_t path_len = strlen(lib_path) + 1;
+    if (path_len > 240) {
+        return arm64_prepare_path(pid, lib_path, path_addr_out);
+    }
+
+    struct pt_regs_arm64 regs;
+    struct iovec iov = { &regs, sizeof(regs) };
+    if (ptrace(PTRACE_GETREGSET, tid, (void *)(long)NT_PRSTATUS, &iov) == 0) {
+        unsigned long sp = ptr_untag(regs.sp) & ~0xFULL;
+        if (sp > 0x400) {
+            unsigned long path_u = sp - 0x300;
+            if (remote_write(pid, path_u, lib_path, path_len) == 0) {
+                inject_dbg("path on stack 0x%lx (untagged, len=%zu)", path_u, path_len);
+                *path_addr_out = path_u;
+                return 0;
+            }
+        }
+    }
+    return arm64_prepare_path(pid, lib_path, path_addr_out);
 }
 
 static int arm64_try_cave_dlopen(int pid, int tid, unsigned long dlopen_addr,
@@ -1103,36 +1394,16 @@ static void detach_all_threads(int pid, int inject_tid) {
 }
 
 int inject_library(int pid, const char *lib_path) {
-    char msg[256];
-
-    snprintf(msg, sizeof(msg), "ANDROCE_INJECT: start pid=%d lib=%s", pid, lib_path);
-    out(msg);
-
-    /* Check SELinux status */
-    FILE *selinux = fopen("/sys/fs/selinux/enforce", "r");
-    if (selinux) {
-        int enforce = 0;
-        if (fscanf(selinux, "%d", &enforce) == 1) {
-            LOGI("SELinux enforce=%d (0=permissive, 1=enforcing)", enforce);
-            if (enforce == 1) {
-                out("ANDROCE_INJECT: WARNING SELinux is enforcing - injection may fail");
-            }
-        }
-        fclose(selinux);
-    }
-
-    if (access(lib_path, R_OK) != 0) {
-        snprintf(msg, sizeof(msg), "ANDROCE_INJECT: FAIL library not readable: %s", strerror(errno));
-        out(msg);
-        return -1;
-    }
+    out("ANDROCE_INJECT: start");
+    inject_dbg("injector=2 build=%s pid=%d lib=%s", INJECTOR_BUILD, pid, lib_path);
 
     char proc_path[64];
     snprintf(proc_path, sizeof(proc_path), "/proc/%d", pid);
     if (access(proc_path, F_OK) != 0) {
-        out("ANDROCE_INJECT: FAIL process not found");
+        out("ANDROCE_INJECT: FAIL target process not found");
         return -1;
     }
+    inject_dbg("target alive");
 
     if (is_lib_loaded(pid, "libspeedhook")) {
         out("ANDROCE_INJECT: OK already loaded");
@@ -1145,11 +1416,12 @@ int inject_library(int pid, const char *lib_path) {
         return -1;
     }
 
+    char msg[256];
     snprintf(msg, sizeof(msg), "ANDROCE_INJECT: dlopen=0x%lx kind=%d",
              dlopen_target.addr, dlopen_target.kind);
     out(msg);
 
-    LOGI("Attaching to pid %d (all threads)", pid);
+    inject_dbg("attaching pid=%d", pid);
     int status = 0;
     int inject_tid = 0;
     int attach_rc = attach_and_wait_stop(pid, &inject_tid, &status);
@@ -1158,48 +1430,40 @@ int inject_library(int pid, const char *lib_path) {
             snprintf(msg, sizeof(msg), "ANDROCE_INJECT: FAIL ptrace attach: %s", strerror(errno));
             out(msg);
         } else {
-            LOGE("Process did not stop after %dms (tid=%d status=0x%x)",
-                 INJECT_ATTACH_TIMEOUT_MS, inject_tid, status);
+            inject_err("attach timeout %dms tid=%d status=0x%x",
+                       INJECT_ATTACH_TIMEOUT_MS, inject_tid, status);
             out("ANDROCE_INJECT: FAIL process did not stop (timeout)");
         }
         detach_all_threads(pid, pid);
         return -1;
     }
 
-    LOGI("Process stopped, inject_tid=%d sig=%d", inject_tid, WSTOPSIG(status));
     char msg_tid[128];
-    snprintf(msg_tid, sizeof(msg_tid), "ANDROCE_INJECT: stopped tid=%d", inject_tid);
+    snprintf(msg_tid, sizeof(msg_tid), "ANDROCE_INJECT: stopped tid=%d sig=%d",
+             inject_tid, WSTOPSIG(status));
     out(msg_tid);
 
     unsigned long stop_pc = get_stop_pc(pid);
+    inject_dbg("stop_pc=0x%lx", stop_pc);
     if (!stop_pc) {
         detach_all_threads(pid, inject_tid);
         out("ANDROCE_INJECT: FAIL no BRK gadget in libc/linker");
         return -1;
     }
 
-    unsigned long dlopen_addr = dlopen_target.addr;
     unsigned long path_addr = 0;
     struct dlopen_target loader_target = {0};
     resolve_dlopen_candidate(pid, 0, &loader_target);
     patch_loader_caller(pid, inject_tid, &dlopen_target);
     patch_loader_caller(pid, inject_tid, &loader_target);
 
-    if (arm64_prepare_path(pid, lib_path, &path_addr) != 0) {
+    if (arm64_prepare_path_ex(pid, inject_tid, stop_pc, lib_path, &path_addr) != 0) {
         out("ANDROCE_INJECT: could not write lib path into target RW memory");
+    } else {
+        inject_dbg("path_addr=0x%lx", path_addr);
     }
 
-    /* memfd first — avoids namespace path issues on Android 10+ games */
-    if (!is_lib_loaded(pid, "libspeedhook") && path_addr) {
-        out("ANDROCE_INJECT: try memfd dlopen");
-        if (inject_via_memfd(pid, inject_tid, stop_pc, lib_path, path_addr, &loader_target) == 0) {
-            detach_all_threads(pid, inject_tid);
-            out("ANDROCE_INJECT: OK lib loaded via memfd");
-            return 0;
-        }
-    }
-
-    /* Direct dlopen on main thread — try loader, dlopen, android_dlopen_ext (distinct addrs). */
+    /* Direct dlopen first (staged path in app lib dir) — memfd is slower and fragile on MTE. */
     if (!is_lib_loaded(pid, "libspeedhook") && path_addr) {
         unsigned long last_addr = 0;
         for (int ci = 0; ci < 8; ci++) {
@@ -1209,11 +1473,17 @@ int inject_library(int pid, const char *lib_path) {
             last_addr = cand.addr;
             patch_loader_caller(pid, inject_tid, &cand);
 
-            snprintf(msg, sizeof(msg), "ANDROCE_INJECT: try direct dlopen kind=%d addr=0x%lx",
-                     cand.kind, cand.addr);
+            snprintf(msg, sizeof(msg), "ANDROCE_INJECT: try direct ci=%d kind=%d addr=0x%lx",
+                     ci, cand.kind, cand.addr);
             out(msg);
+            if (cand.kind == DLOPEN_LOADER_3ARG) {
+                inject_dbg("loader caller=0x%lx", cand.caller_addr);
+            }
+            char method_tag[32];
+            snprintf(method_tag, sizeof(method_tag), "d%dk%d", ci, (int)cand.kind);
             unsigned long long ret = 0;
-            int call_ok = arm64_try_direct_dlopen(inject_tid, &cand, path_addr, stop_pc, &ret, "direct");
+            int call_ok = arm64_try_direct_dlopen(inject_tid, &cand, path_addr, stop_pc, &ret,
+                                                  method_tag);
             int loaded = is_lib_loaded(pid, "libspeedhook");
             snprintf(msg, sizeof(msg),
                      "ANDROCE_INJECT: direct ret=0x%llx call_ok=%d loaded=%d",
@@ -1227,17 +1497,93 @@ int inject_library(int pid, const char *lib_path) {
         }
     }
 
-    LOGI("Trying mmap page + direct dlopen");
+    if (!is_lib_loaded(pid, "libspeedhook") && path_addr) {
+        out("ANDROCE_INJECT: try memfd dlopen");
+        if (inject_via_memfd(pid, inject_tid, stop_pc, lib_path, path_addr, &loader_target) == 0) {
+            detach_all_threads(pid, inject_tid);
+            out("ANDROCE_INJECT: OK lib loaded via memfd");
+            return 0;
+        }
+    }
+
+    out("ANDROCE_INJECT: try mmap page");
     int inject_result = inject_via_mmap_page(pid, inject_tid, stop_pc, lib_path);
 
+    if (inject_result == -2) {
+        inject_dbg("mmap skipped (invalid page on API 35+)");
+    } else if (inject_result != 0) {
+        inject_err("mmap page path failed rc=%d", inject_result);
+    }
+
+    out("ANDROCE_INJECT: try fallback direct dlopen");
+    if (!path_addr) {
+        inject_err("no path_addr for fallback dlopen");
+    } else {
+        for (int ci = 0; ci < 8; ci++) {
+            struct dlopen_target cand;
+            if (resolve_dlopen_candidate(pid, ci, &cand) != 0) break;
+            if (cand.kind == DLOPEN_ANDROID_EXT_3ARG) continue;
+            patch_loader_caller(pid, inject_tid, &cand);
+
+            unsigned long long ret = 0;
+            snprintf(msg, sizeof(msg), "ANDROCE_INJECT: try fallback ci=%d kind=%d addr=0x%lx",
+                     ci, cand.kind, cand.addr);
+            out(msg);
+            char method_tag[32];
+            snprintf(method_tag, sizeof(method_tag), "fb%dk%d", ci, (int)cand.kind);
+            if (arm64_remote_call(inject_tid, &cand, path_addr, stop_pc, &ret, method_tag) != 0) {
+                continue;
+            }
+            if (is_lib_loaded(pid, "libspeedhook")) {
+                out("ANDROCE_INJECT: OK direct dlopen succeeded");
+                goto inject_detach_done;
+            }
+        }
+    }
+
+    out("ANDROCE_INJECT: try proc_mem dlopen");
+    size_t path_len = strlen(lib_path) + 1;
+    unsigned long rw_region_size = 0;
+    unsigned long rw_base = find_anon_rw_region(pid, path_len + 0x100, &rw_region_size);
+    unsigned long rw_addr = scratch_addr_at_tail(rw_base, rw_region_size, path_len);
+    if (rw_addr) {
+        inject_dbg("proc_mem scratch=0x%lx", rw_addr);
+        if (proc_mem_write(pid, rw_addr, lib_path, path_len) == 0) {
+            for (int ci = 0; ci < 8; ci++) {
+                struct dlopen_target cand;
+                if (resolve_dlopen_candidate(pid, ci, &cand) != 0) break;
+                if (cand.kind == DLOPEN_ANDROID_EXT_3ARG) continue;
+                patch_loader_caller(pid, inject_tid, &cand);
+
+                unsigned long long ret = 0;
+                snprintf(msg, sizeof(msg), "ANDROCE_INJECT: try proc_mem ci=%d kind=%d addr=0x%lx",
+                         ci, cand.kind, cand.addr);
+                out(msg);
+                char method_tag[32];
+                snprintf(method_tag, sizeof(method_tag), "pm%dk%d", ci, (int)cand.kind);
+                if (arm64_remote_call(inject_tid, &cand, rw_addr, stop_pc, &ret, method_tag) != 0) {
+                    continue;
+                }
+                if (is_lib_loaded(pid, "libspeedhook")) {
+                    out("ANDROCE_INJECT: OK proc mem injection succeeded");
+                    goto inject_detach_done;
+                }
+            }
+        }
+    } else {
+        inject_err("no anon scratch for proc_mem");
+    }
+
+inject_detach_done:
     detach_all_threads(pid, inject_tid);
 
     if (is_lib_loaded(pid, "libspeedhook")) {
         out("ANDROCE_INJECT: OK lib loaded (post-inject maps check)");
         return 0;
     }
+    inject_dbg("final maps check: lib not loaded");
 
-    if (inject_result < 0) {
+    if (inject_result == -1) {
         if (access(proc_path, F_OK) != 0) {
             out("ANDROCE_INJECT: FAIL target crashed during injection");
         } else {
@@ -1248,9 +1594,11 @@ int inject_library(int pid, const char *lib_path) {
         return -1;
     }
 
-    snprintf(msg, sizeof(msg), "ANDROCE_INJECT: OK lib loaded via mmap stub");
+    /* All methods attempted but library not loaded */
+    snprintf(msg, sizeof(msg),
+             "ANDROCE_INJECT: FAIL all injection methods failed (Android 15 restrictions)");
     out(msg);
-    return 0;
+    return -1;
 }
 
 int main(int argc, char *argv[]) {

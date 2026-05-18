@@ -24,7 +24,7 @@ enum class SpeedHookMethod(
     PLT_GAME(
         id = 2,
         title = "GOT — game engines",
-        description = "Hooks Cocos/Unity-style libs only. Skips FMOD and media. Best for Geometry Dash.",
+        description = "Hooks Cocos/Unity-style libs only. Skips FMOD and media. Best for rhythm and platformer games.",
         risk = HookRisk.LOW
     ),
     PLT_UNIVERSAL(

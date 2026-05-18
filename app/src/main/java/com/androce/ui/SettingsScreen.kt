@@ -80,6 +80,7 @@ import androidx.compose.ui.unit.sp
 import com.androce.core.AppLogger
 import com.androce.core.AppPrefs
 import com.androce.core.DependencyInstaller
+import com.androce.core.FridaSpeedHack
 import com.androce.core.MemoryReader
 import com.androce.ui.components.AppButton
 import com.androce.ui.components.AppCard
@@ -139,6 +140,7 @@ fun SettingsScreen() {
     var requirements by remember { mutableStateOf<List<RequirementStatus>>(emptyList()) }
     var checking by remember { mutableStateOf(RequirementsCache.checking) }
     var showPythonInstallDialog by remember { mutableStateOf(false) }
+    var showFridaInstallDialog by remember { mutableStateOf(false) }
     var showSwapDialog by remember { mutableStateOf(false) }
     var pythonInstallResult by remember { mutableStateOf<DependencyInstaller.InstallResult?>(null) }
     var swapOptions by remember { mutableStateOf<List<DependencyInstaller.SwapDisableOption>>(emptyList()) }
@@ -165,6 +167,35 @@ fun SettingsScreen() {
                 }
                 "SHOW_PYTHON_DIALOG" -> {
                     { showPythonInstallDialog = true; Unit }
+                }
+                "SHOW_FRIDA_DIALOG" -> {
+                    { showFridaInstallDialog = true; Unit }
+                }
+                "START_FRIDA_SERVER" -> {
+                    {
+                        scope.launch(Dispatchers.IO) {
+                            val ok = DependencyInstaller.startFridaServerShell()
+                            if (!ok) {
+                                DependencyInstaller.runFridaSetup { }
+                            }
+                            withContext(Dispatchers.Main) { onRecheck() }
+                        }
+                        Unit
+                    }
+                }
+                "OPEN_TERMUX" -> {
+                    {
+                        val launched = Shell.cmd(
+                            "am start -n com.termux/.app.TermuxActivity 2>/dev/null"
+                        ).exec().isSuccess
+                        if (!launched) {
+                            Shell.cmd(
+                                "am start -a android.intent.action.VIEW " +
+                                    "-d 'market://details?id=com.termux' 2>/dev/null"
+                            ).exec()
+                        }
+                        Unit
+                    }
                 }
                 else -> {
                     {
@@ -284,6 +315,60 @@ fun SettingsScreen() {
                         )
                 )
 
+                val frida = FridaSpeedHack.probeStatus()
+                val fridaDetail = buildString {
+                    append(frida.summary)
+                    frida.cliVersion?.let { append(" — ").append(it) }
+                    frida.cliPath?.let { append("\n").append(it) }
+                    frida.serverBinary?.takeIf { !frida.serverRunning }?.let {
+                        append("\nServer binary: ").append(it)
+                    }
+                }
+                snapshots.add(
+                    when {
+                        frida.ready -> RequirementSnapshot(
+                            "Frida (speed hack)",
+                            fridaDetail,
+                            RequirementLevel.OK
+                        )
+                        frida.cliPath != null && !frida.serverRunning -> RequirementSnapshot(
+                            "Frida (speed hack)",
+                            fridaDetail,
+                            RequirementLevel.WARN,
+                            fixLabel = "Start server",
+                            fixCommand = "START_FRIDA_SERVER"
+                        )
+                        frida.termuxInstalled -> RequirementSnapshot(
+                            "Frida (speed hack)",
+                            fridaDetail,
+                            RequirementLevel.WARN,
+                            fixLabel = "Install",
+                            fixCommand = "SHOW_FRIDA_DIALOG"
+                        )
+                        else -> RequirementSnapshot(
+                            "Frida (speed hack)",
+                            fridaDetail,
+                            RequirementLevel.WARN,
+                            fixLabel = "Get Termux",
+                            fixCommand = "OPEN_TERMUX"
+                        )
+                    }
+                )
+
+                snapshots.add(
+                    if (frida.termuxInstalled) {
+                        RequirementSnapshot("Termux app", "Installed", RequirementLevel.OK)
+                    } else {
+                        RequirementSnapshot(
+                            "Termux app",
+                            "Not installed — needed for Python and Frida speed hack fallback",
+                            RequirementLevel.WARN,
+                            fixLabel = "Get Termux",
+                            fixCommand = "OPEN_TERMUX"
+                        )
+                    }
+                )
+
                 withContext(Dispatchers.Main) {
                     RequirementsCache.snapshots = snapshots
                     requirements = buildStatusList(snapshots, ::runChecks)
@@ -305,6 +390,10 @@ fun SettingsScreen() {
             runChecks()
         }
     }
+
+    val fridaReady = requirements
+        .firstOrNull { it.label == "Frida (speed hack)" }
+        ?.level == RequirementLevel.OK
 
     // --- Tab state ---
     var selectedTab by remember { mutableIntStateOf(0) }
@@ -342,7 +431,7 @@ fun SettingsScreen() {
                         onFreezeChanged = { freezeMs = it; AppPrefs.freezeIntervalMs = it }
                     )
                     2 -> SpeedTab(
-                        defaultSpeed, autoEnableSpeed,
+                        defaultSpeed, autoEnableSpeed, fridaReady,
                         onDefaultSpeedChanged = { defaultSpeed = it; AppPrefs.defaultSpeedMultiplier = it },
                         onAutoEnableChanged = { autoEnableSpeed = it; AppPrefs.autoEnableSpeedHack = it }
                     )
@@ -416,6 +505,19 @@ fun SettingsScreen() {
                 if (result.success) {
                     scope.launch(Dispatchers.IO) {
                         MemoryReader.refreshPythonStatus()
+                        withContext(Dispatchers.Main) { runChecks() }
+                    }
+                }
+            }
+        )
+    }
+
+    if (showFridaInstallDialog) {
+        FridaInstallDialog(
+            onDismiss = { showFridaInstallDialog = false },
+            onInstallComplete = { result ->
+                if (result.success) {
+                    scope.launch(Dispatchers.IO) {
                         withContext(Dispatchers.Main) { runChecks() }
                     }
                 }
@@ -523,6 +625,8 @@ private fun StatusTab(
             Spacer(Modifier.height(8.dp))
             TipRow("Python engine finds more results — it reads fresh pages even when memory is swapped or compressed")
             TipRow("Tap 'Install' next to Python in Status to set up Python automatically via Termux")
+            TipRow("Frida (speed hack): tap Install in Status — downloads and configures automatically (Termux required)")
+            TipRow("On Android 15, Frida fallback is used when native library injection fails")
             TipRow("Tap 'Manage' next to Memory swap to see device-specific swap disable options")
             TipRow("Native C may miss values on devices with MemFusion/zRAM due to stale page cache")
             TipRow("Disable MemFusion/zRAM and reboot before scanning for best accuracy")
@@ -629,6 +733,7 @@ private fun ScanTab(
 private fun SpeedTab(
     defaultSpeed: Float,
     autoEnableSpeed: Boolean,
+    fridaReady: Boolean,
     onDefaultSpeedChanged: (Float) -> Unit,
     onAutoEnableChanged: (Boolean) -> Unit
 ) {
@@ -638,8 +743,15 @@ private fun SpeedTab(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Speed Hack settings
         SectionLabel("Speed Hack")
+        if (!fridaReady) {
+            WarningBanner(
+                title = "Frida fallback not ready",
+                message = "Open Settings → Status and tap Install next to Frida (speed hack). " +
+                    "Required on many Android 15 devices when native injection fails."
+            )
+            Spacer(Modifier.height(12.dp))
+        }
         SettingsCard {
             Text("Default speed multiplier", color = OnBackground, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(8.dp))
@@ -743,6 +855,17 @@ private fun SpeedTab(
             Text(
                 "Note: Not all games are compatible. Some use alternative timing methods or have anti-cheat protection.",
                 color = Warning,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (fridaReady) {
+                    "Frida fallback: ready (see Status tab)."
+                } else {
+                    "Frida fallback: not ready — check Settings → Status."
+                },
+                color = if (fridaReady) AccentGreen else OnSurface,
                 fontSize = 12.sp,
                 lineHeight = 16.sp
             )
@@ -1035,8 +1158,13 @@ internal fun PythonInstallDialog(
     }
 
     LaunchedEffect(Unit) {
-        if (!autoStarted) {
-            autoStarted = true
+        if (autoStarted) return@LaunchedEffect
+        autoStarted = true
+        scope.launch {
+            if (DependencyInstaller.isPythonSetupComplete()) {
+                appendLog("Python already installed — tap Re-check to verify")
+                return@launch
+            }
             runSetup()
         }
     }
@@ -1080,6 +1208,13 @@ internal fun PythonInstallDialog(
                     color = OnSurface,
                     fontSize = 13.sp,
                     lineHeight = 18.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Full log on device: ${com.androce.core.SetupLogger.DEVICE_LOG_PATH}",
+                    color = OnSurface,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
                 )
                 Spacer(Modifier.height(12.dp))
 
@@ -1141,6 +1276,186 @@ internal fun PythonInstallDialog(
                             "1. Install Termux from F-Droid (com.termux)\n" +
                             "2. Grant root and allow internet (bootstrap downloads in background)\n" +
                             "3. Tap Setup Python again — Termux app does not need to be opened",
+                            color = OnBackground.copy(alpha = 0.8f),
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 18.sp
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !installing) {
+                Text("Close", color = OnBackground)
+            }
+        },
+        containerColor = Surface,
+        shape = RoundedCornerShape(16.dp)
+    )
+}
+
+@Composable
+internal fun FridaInstallDialog(
+    onDismiss: () -> Unit,
+    onInstallComplete: (DependencyInstaller.InstallResult) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var installing by remember { mutableStateOf(false) }
+    var installLog by remember { mutableStateOf("") }
+    var lastResult by remember { mutableStateOf<DependencyInstaller.InstallResult?>(null) }
+    var elapsedSec by remember { mutableIntStateOf(0) }
+    var autoStarted by remember { mutableStateOf(false) }
+    val logScroll = rememberScrollState()
+    val bodyScroll = rememberScrollState()
+
+    fun appendLog(line: String) {
+        installLog = if (installLog.isEmpty()) line else "$installLog\n$line"
+    }
+
+    fun runSetup() {
+        if (installing) return
+        installing = true
+        lastResult = null
+        installLog = ""
+        elapsedSec = 0
+        scope.launch {
+            val result = DependencyInstaller.runFridaSetup { appendLog(it) }
+            installing = false
+            lastResult = result
+            appendLog(if (result.success) "✓ ${result.message}" else "✗ ${result.message}")
+            onInstallComplete(result)
+            Toast.makeText(
+                context,
+                if (result.success) "Frida ready" else "Frida setup needs attention",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (autoStarted) return@LaunchedEffect
+        autoStarted = true
+        scope.launch {
+            if (DependencyInstaller.isFridaSetupComplete()) {
+                appendLog("Frida already installed — tap Install Frida to re-check only")
+                return@launch
+            }
+            runSetup()
+        }
+    }
+
+    LaunchedEffect(installLog) {
+        if (installLog.isNotEmpty()) {
+            logScroll.scrollTo(logScroll.maxValue)
+        }
+    }
+
+    LaunchedEffect(installing) {
+        if (!installing) return@LaunchedEffect
+        while (installing) {
+            delay(1000)
+            elapsedSec++
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!installing) onDismiss() },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.InstallDesktop,
+                    contentDescription = null,
+                    tint = Primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Frida Setup", color = OnBackground)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(bodyScroll)
+            ) {
+                Text(
+                    "Frida is used when native speed-hack injection fails (common on Android 15). " +
+                        "Setup downloads Frida from Termux packages into a root-accessible location and starts frida-server — " +
+                        "you do not need to open Termux or run commands manually.",
+                    color = OnSurface,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Full log on device: ${com.androce.core.SetupLogger.DEVICE_LOG_PATH}",
+                    color = OnSurface,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(Modifier.height(12.dp))
+
+                Button(
+                    onClick = { runSetup() },
+                    enabled = !installing,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Primary)
+                ) {
+                    if (installing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            if (elapsedSec > 0) "Setting up... (${elapsedSec}s)" else "Setting up...",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        Text(
+                            if (lastResult?.success == true) "Re-check Frida" else "Install Frida",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Progress",
+                    color = OnBackground,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = installLog.ifEmpty { "Starting setup..." },
+                    color = if (lastResult?.success == true) AccentGreen else OnSurface,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 16.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 80.dp, max = 200.dp)
+                        .verticalScroll(logScroll)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(SurfaceVariant.copy(alpha = 0.5f))
+                        .padding(8.dp)
+                )
+
+                if (!installing && lastResult?.success != true) {
+                    Spacer(Modifier.height(10.dp))
+                    SettingsCard {
+                        Text(
+                            "If setup fails:\n" +
+                            "1. Install Termux from F-Droid (com.termux)\n" +
+                            "2. Grant root and allow internet\n" +
+                            "3. Tap Install Frida again — Termux app does not need to be opened",
                             color = OnBackground.copy(alpha = 0.8f),
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,

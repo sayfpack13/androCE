@@ -274,8 +274,20 @@ int speedhook_is_game_caller(void *return_addr) {
 }
 
 static int protect_got_slot(void **slot) {
-    uintptr_t page = (uintptr_t)slot & ~(uintptr_t)0xfff;
-    return mprotect((void *)page, 0x1000, PROT_READ | PROT_WRITE);
+    static size_t cached_page_size = 0;
+    static int cached_page_size_initialized = 0;
+    
+    if (!cached_page_size_initialized) {
+        pthread_mutex_lock(&g_hook_mutex);
+        if (!cached_page_size_initialized) {
+            long ps = sysconf(_SC_PAGESIZE);
+            cached_page_size = ps > 0 ? (size_t)ps : 4096;
+            cached_page_size_initialized = 1;
+        }
+        pthread_mutex_unlock(&g_hook_mutex);
+    }
+    uintptr_t page = (uintptr_t)slot & ~(uintptr_t)(cached_page_size - 1);
+    return mprotect((void *)page, cached_page_size, PROT_READ | PROT_WRITE);
 }
 
 static int is_system_time_resolver(void *fn) {

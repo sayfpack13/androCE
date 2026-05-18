@@ -123,6 +123,8 @@ if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd_HHmmss'"') do set "TS=%%t"
 set "LOGFILE=%LOGDIR%\logcat_%TS%.txt"
 echo Saving to: %LOGFILE%
+echo Install log on device: /data/local/tmp/androce/install.log
+echo Pull with: adb pull /data/local/tmp/androce/install.log logs\
 echo.
 
 set "APP_PID="
@@ -132,11 +134,11 @@ for /L %%i in (1,1,15) do (
     ping 127.0.0.1 -n 2 >nul
 )
 
-echo WARNING: com.androce PID not found — falling back to error tag filter.
-powershell -NoProfile -Command "adb logcat -v time SpeedInjector:I SpeedInjector:E SpeedHook:E GlobalExceptionHandler:E AndroidRuntime:E androCE.MemoryReader:E androCE.Scanner:E androCE.MemoryWriter:E androCE.ScanViewModel:E androCE.ProcessLister:E *:S 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
+echo WARNING: com.androce PID not found — using tag filter (SpeedInjector I+E for ANDROCE_* lines).
+powershell -NoProfile -Command "adb logcat -v time SpeedInjector:I SpeedInjector:E SpeedHook:I SpeedHook:E SpeedHook:W androCE.DependencyInstaller:I androCE.DependencyInstaller:E androCE.FridaSpeedHack:I androCE.FridaSpeedHack:E GlobalExceptionHandler:E AndroidRuntime:E DEBUG:F androCE.MemoryReader:E androCE.Scanner:E androCE.MemoryWriter:E androCE.ScanViewModel:E androCE.ProcessLister:E *:S 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
 exit /b 0
 
 :stream_logs_pid
 echo App PID: !APP_PID!
-powershell -NoProfile -Command "adb logcat -v time SpeedInjector:I SpeedInjector:E SpeedHook:I SpeedHook:E SpeedHook:W AndroidRuntime:E DEBUG:F *:S 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
+powershell -NoProfile -Command "adb logcat -v time SpeedInjector:I SpeedInjector:E SpeedHook:I SpeedHook:E SpeedHook:W androCE.DependencyInstaller:I androCE.DependencyInstaller:E androCE.FridaSpeedHack:I androCE.FridaSpeedHack:E AndroidRuntime:E DEBUG:F *:S 2>&1 | Tee-Object -FilePath '%LOGFILE%'"
 exit /b 0

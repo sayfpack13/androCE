@@ -356,7 +356,7 @@ private fun SpeedSliderCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HookMethodSelector(
+fun HookMethodSelector(
     selected: SpeedHookMethod,
     enabled: Boolean,
     showReactivateHint: Boolean,

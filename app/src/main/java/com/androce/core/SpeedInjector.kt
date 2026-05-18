@@ -210,25 +210,26 @@ object SpeedInjector {
                 return@withContext false
             }
 
-            withTimeout(35_000) {
-                val libPath = libraryForTargetAbi(ctx, targetAbi)
-                    ?: libraryPath
-                    ?: run {
-                        SpeedControl.setFailed("Speed hook library not found for $targetAbi")
-                        return@withTimeout false
-                    }
-
-                val injector = injectorPath ?: run {
-                    SpeedControl.setFailed("Injector binary not found — reinstall the app")
-                    return@withTimeout false
+            val libPath = libraryForTargetAbi(ctx, targetAbi)
+                ?: libraryPath
+                ?: run {
+                    SpeedControl.setFailed("Speed hook library not found for $targetAbi")
+                    return@withContext false
                 }
 
-                setupSharedMemory()
-                val hookMode = currentHookMode()
-                lastHookMode = hookMode
-                writeSpeedToShm(SpeedControl.state.value.speedMultiplier, hookMode)
+            val injector = injectorPath ?: run {
+                SpeedControl.setFailed("Injector binary not found — reinstall the app")
+                return@withContext false
+            }
 
-                var injection = InjectionResult(false, "Injection failed")
+            setupSharedMemory()
+            val hookMode = currentHookMode()
+            lastHookMode = hookMode
+            writeSpeedToShm(SpeedControl.state.value.speedMultiplier, hookMode)
+
+            var injection = InjectionResult(false, "Injection failed")
+
+            withTimeout(35_000) {
                 withPermissiveSelinux {
                     val injectPaths = prepareLibraryForTarget(
                         livePid,
@@ -248,18 +249,39 @@ object SpeedInjector {
                         }
                     }
                 }
-
-                if (injection.success) {
-                    writeSpeedToShm(SpeedControl.state.value.speedMultiplier, hookMode)
-                    SpeedControl.setActive(livePid, processName)
-                    Log.i(TAG, "OK pid=$livePid $processName abi=$targetAbi hookMode=$hookMode")
-                } else {
-                    Log.e(TAG, "FAIL pid=$livePid $processName: ${injection.error}")
-                    SpeedControl.setFailed(injection.error ?: "Injection failed")
-                }
-
-                injection.success
+                injection.success || verifyInjection(livePid)
             }
+
+            if (!injection.success && !verifyInjection(livePid) && isProcessAlive(livePid)) {
+                withTimeout(180_000) {
+                    Log.i(TAG, "Native inject failed — setting up Frida in-app...")
+                    val fridaReady = FridaSpeedHack.ensureReady(ctx) { line ->
+                        Log.i(TAG, "Frida setup: $line")
+                    }
+                    if (fridaReady) {
+                        withPermissiveSelinux {
+                            injection = tryFridaFallback(ctx, livePid, packageName)
+                        }
+                    } else {
+                        injection = InjectionResult(
+                            false,
+                            FridaSpeedHack.lastSetupError() ?: FridaSpeedHack.termuxSetupHint()
+                        )
+                    }
+                    injection.success
+                }
+            }
+
+            if (injection.success) {
+                writeSpeedToShm(SpeedControl.state.value.speedMultiplier, hookMode)
+                SpeedControl.setActive(livePid, processName)
+                Log.i(TAG, "OK pid=$livePid $processName abi=$targetAbi hookMode=$hookMode")
+            } else {
+                Log.e(TAG, "FAIL pid=$livePid $processName: ${injection.error}")
+                SpeedControl.setFailed(injection.error ?: "Injection failed")
+            }
+
+            injection.success
         } catch (_: TimeoutCancellationException) {
             Log.e(TAG, "FAIL pid=$pid $processName: shell timeout")
             SpeedControl.setFailed("Injection timed out — reopen the target app and activate again")
@@ -403,17 +425,32 @@ object SpeedInjector {
             return InjectionResult(false, "Injector missing at $injector — reinstall the app")
         }
 
+        Log.i(
+            TAG,
+            "=== inject pid=$pid hookMode=${currentHookMode()} lib=$libPath ==="
+        )
         val result = Shell.cmd("'$injector' $pid '$libPath' 2>&1").exec()
         val lines = result.out + result.err
-        lines.filter { it.contains("ANDROCE_INJECT") }.forEach { line ->
-            if (line.contains("FAIL") || line.contains("WARNING")) Log.e(TAG, line.trim())
-            else Log.i(TAG, line.trim())
+        lines.filter { it.isNotBlank() }.forEach { line ->
+            val t = line.trim()
+            when {
+                t.contains("ANDROCE_INJECT: FAIL") || t.contains("ANDROCE_DBG:") &&
+                    (t.contains("crash") || t.contains("timeout") || t.contains("errno") ||
+                        t.contains("invalid") || t.contains("failed") || t.contains("NULL")) ->
+                    Log.e(TAG, t)
+                t.startsWith("ANDROCE_") -> Log.i(TAG, t)
+                else -> Log.d(TAG, "injector: $t")
+            }
+        }
+        if (!result.isSuccess) {
+            Log.e(TAG, "injector exit code=${result.code}")
         }
 
         val output = lines.joinToString("\n")
 
-        if (output.contains("ANDROCE_INJECT: OK") || verifyInjection(pid)) {
-            if (verifyInjection(pid)) {
+        val verified = verifyInjection(pid)
+        if (output.contains("ANDROCE_INJECT: OK") || verified) {
+            if (verified) {
                 return InjectionResult(true)
             }
             return InjectionResult(
@@ -461,7 +498,23 @@ object SpeedInjector {
         return InjectionResult(
             success = false,
             error = detail?.let { "Could not load hook: $it" }
-                ?: "Linker blocked library load — reboot, confirm root for androCE, retry"
+                ?: android15InjectHint()
+        )
+    }
+
+    private fun android15InjectHint(): String =
+        "Native inject failed on this device. Open Settings → Status and tap Install next to Frida, then retry."
+
+    private fun tryFridaFallback(context: Context, pid: Int, packageName: String): InjectionResult {
+        Log.i(TAG, "Trying Frida fallback pid=$pid")
+        val speed = SpeedControl.state.value.speedMultiplier
+        if (FridaSpeedHack.attach(context, pid, packageName, speed)) {
+            Log.i(TAG, "OK Frida speedhack pid=$pid (hooks via Termux, not libspeedhook.so)")
+            return InjectionResult(true)
+        }
+        return InjectionResult(
+            false,
+            "Native inject failed. ${FridaSpeedHack.termuxSetupHint()}"
         )
     }
 
@@ -481,6 +534,7 @@ object SpeedInjector {
         if (state.state != com.androce.core.SpeedHackState.ACTIVE) return@withContext true
 
         val pid = state.targetPid
+        if (FridaSpeedHack.isAttached(pid) && isProcessAlive(pid)) return@withContext true
         val ok = isProcessAlive(pid) && verifyInjection(pid)
         if (!ok) {
             reset()
@@ -492,12 +546,20 @@ object SpeedInjector {
     }
 
     suspend fun updateSpeed(speed: Float) = withContext(Dispatchers.IO) {
-        writeSpeedToShm(speed, currentHookMode())
+        val pid = SpeedControl.state.value.targetPid
+        if (FridaSpeedHack.isAttached(pid)) {
+            FridaSpeedHack.updateSpeed(pid, speed)
+        } else {
+            writeSpeedToShm(speed, currentHookMode())
+        }
     }
 
     fun reset() {
+        FridaSpeedHack.clear()
         try {
-            Shell.cmd("rm -f $SHM_PATH").exec()
+            // Write default speed (1.0f) to SHM instead of deleting it
+            // This keeps the mmap valid if hook library is still loaded
+            writeSpeedToShm(1.0f, lastHookMode)
             stagedLibPaths.toList().forEach { path ->
                 Shell.cmd("rm -f '$path'").exec()
             }
