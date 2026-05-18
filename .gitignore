@@ -20,6 +20,8 @@ captures/
 
 # Local SDK / keystore
 local.properties
+adb-wlan.conf
+
 *.jks
 *.keystore
 
