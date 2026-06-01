@@ -595,7 +595,7 @@ os.close(fd)
         } catch (_: Exception) { null }
     }
 
-    private fun compareNumeric(op: String, newBytes: ByteArray, oldBytes: ByteArray, operand1: String?, operand2: String?, tcode: String): Boolean {
+    fun compareNumeric(op: String, newBytes: ByteArray, oldBytes: ByteArray, operand1: String?, operand2: String?, tcode: String): Boolean {
         val isFloat = tcode in listOf("f4", "f8")
         val eps = 1e-4
         return if (isFloat) {

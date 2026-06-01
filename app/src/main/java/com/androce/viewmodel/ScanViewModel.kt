@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.androce.core.AppLogger
 import com.androce.core.AppPrefs
 import com.androce.core.FreezeService
+import com.androce.core.MemoryProvider
 import com.androce.core.MemoryReader
 import com.androce.core.MemoryWriter
 import com.androce.core.ScanProgress
@@ -51,15 +52,45 @@ data class CheatTableMeta(val processName: String, val savedAt: Long, val entryC
 
 class ScanViewModel : ViewModel() {
 
+    private fun provider(): MemoryProvider = com.androce.core.MemoryAccess.current
+
+    private fun updateMemoryProvider() {
+        val sel = _selectedProcess.value
+        com.androce.core.MemoryAccess.current = when {
+            sel?.isVirtual == true && com.androce.core.RootAccess.hasRoot() ->
+                com.androce.core.RootMemoryProvider
+            sel?.isVirtual == true ->
+                com.androce.core.VirtualMemoryProvider
+            else -> com.androce.core.RootMemoryProvider
+        }
+    }
+
+    private fun scanBlockedReason(): String? {
+        val sel = _selectedProcess.value
+        if (sel?.isVirtual == true) {
+            if (com.androce.core.RootAccess.hasRoot()) return null
+            if (com.androce.core.virtual.GuestMemoryClient.isConnected()) return null
+            return "Guest memory bridge not ready — launch the clone (Play), wait a few seconds, then scan"
+        }
+        if (!com.androce.core.RootAccess.hasRoot()) {
+            return "Root access is required for memory scan"
+        }
+        return null
+    }
+
     private val _selectedProcess = MutableStateFlow<ProcessInfo?>(null)
     val selectedProcess: StateFlow<ProcessInfo?> = _selectedProcess
 
     fun setSelectedProcess(value: ProcessInfo?) {
         val current = _selectedProcess.value
-        if (current?.pid == value?.pid && current?.packageName == value?.packageName) return
+        val sameProcess = current?.packageName == value?.packageName &&
+            current?.pid == value?.pid &&
+            current?.isVirtual == value?.isVirtual
+        if (sameProcess) return
 
         val previous = current
         _selectedProcess.value = value
+        updateMemoryProvider()
         onProcessContextChanged(previous, value)
     }
 
@@ -85,7 +116,8 @@ class ScanViewModel : ViewModel() {
         }
     }
 
-    fun requireSelectedPid(): Int? = _selectedProcess.value?.pid
+    /** Live PID for memory I/O — always re-resolves virtual guest processes. */
+    fun requireSelectedPid(): Int? = effectivePid()
 
     var selectedValueType: ValueType = ValueType.BYTE4
     var searchInput: String = ""
@@ -140,11 +172,64 @@ class ScanViewModel : ViewModel() {
         context.stopService(Intent(context, FreezeService::class.java))
     }
 
+    private fun effectivePid(): Int? {
+        val selected = selectedProcess.value ?: return null
+        if (selected.isVirtual && selected.packageName.isNotBlank()) {
+            val ctx = com.androce.AndroCEApp.instance
+            com.androce.core.virtual.VirtualEngineFacade.refreshRuntimeState(ctx)
+            var resolved = com.androce.core.virtual.VirtualEngineFacade.resolveGuestPid(ctx, selected.packageName)
+            if (resolved <= 0) {
+                val rt = com.androce.core.virtual.VirtualEngineFacade.runtimeState.value
+                if (rt.packageName == selected.packageName && rt.pid > 0) {
+                    resolved = rt.pid
+                }
+            }
+            if (resolved > 0) {
+                syncVirtualPidIfNeeded(resolved)
+                return resolved
+            }
+            return null
+        }
+        return selected.pid.takeIf { it > 0 }
+    }
+
+    private fun syncVirtualPidIfNeeded(resolved: Int) {
+        val selected = _selectedProcess.value ?: return
+        if (!selected.isVirtual || resolved <= 0 || selected.pid == resolved) return
+        _selectedProcess.value = selected.copy(pid = resolved)
+    }
+
+    private fun resolvePidForScan(): Int? {
+        updateMemoryProvider()
+        val sel = _selectedProcess.value
+        if (sel?.isVirtual == true && !com.androce.core.RootAccess.hasRoot()) {
+            val ctx = com.androce.AndroCEApp.instance
+            if (!com.androce.core.virtual.GuestMemoryClient.isConnected()) {
+                com.androce.core.virtual.GuestMemoryClient.connect(ctx, sel.packageName)
+            }
+            updateMemoryProvider()
+        }
+        scanBlockedReason()?.let {
+            _scanState.value = ScanState.Error(it)
+            return null
+        }
+        val pid = effectivePid()
+        if (pid == null || pid <= 0) {
+            _scanState.value = ScanState.Error(
+                "Guest PID not available — tap Open on the running clone (Virtual Space) and keep it in the background"
+            )
+            return null
+        }
+        return pid
+    }
+
+    private fun requirePidForMemoryOp(): Int? = effectivePid()
+
     fun loadRegions() {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = effectivePid() ?: return
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val regions = MemoryReader.getReadableRegions(pid)
+                val regions = provider().getReadableRegions(pid)
                 withContext(Dispatchers.Main) {
                     if (isCurrentProcess(pid)) {
                         _regions.value = regions
@@ -161,7 +246,13 @@ class ScanViewModel : ViewModel() {
         }
     }
 
-    private fun isCurrentProcess(pid: Int): Boolean = _selectedProcess.value?.pid == pid
+    private fun isCurrentProcess(pid: Int): Boolean {
+        val selected = _selectedProcess.value ?: return false
+        if (selected.pid == pid) return true
+        if (!selected.isVirtual) return false
+        val resolved = effectivePid()
+        return resolved != null && resolved == pid
+    }
 
     /**
      * Expand aggregate value types (ALL_*) to their component types.
@@ -188,7 +279,7 @@ class ScanViewModel : ViewModel() {
             if (regionsPid == pid) return@withLock cached
 
             try {
-                val loaded = MemoryReader.getReadableRegions(pid)
+                val loaded = provider().getReadableRegions(pid)
                 val applied = withContext(Dispatchers.Main) {
                     if (isCurrentProcess(pid)) {
                         _regions.value = loaded
@@ -216,7 +307,11 @@ class ScanViewModel : ViewModel() {
     // ---- Scans ----
 
     fun firstScan() {
-        val pid = selectedProcess.value?.pid ?: return
+        if (_selectedProcess.value == null) {
+            _scanState.value = ScanState.Error("No process selected — launch a clone from Virtual Space")
+            return
+        }
+        val pid = resolvePidForScan() ?: return
 
         val expandedTypes = getExpandedTypes(selectedValueType)
         if (expandedTypes.size > 1) {
@@ -651,7 +746,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun unknownInitialScan() {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = resolvePidForScan() ?: return
 
         val expandedTypes = getExpandedTypes(selectedValueType)
         if (expandedTypes.size > 1) {
@@ -758,7 +853,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun refinedScan() {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = resolvePidForScan() ?: return
         val previous = _results.value
         if (previous.isEmpty()) {
             firstScan(); return
@@ -882,7 +977,7 @@ class ScanViewModel : ViewModel() {
      * EXACT and BETWEEN use the rangeMin/rangeMax or searchInput.
      */
     fun comparisonScan(op: ScanComparison) {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = resolvePidForScan() ?: return
         val previous = _results.value
         if (previous.isEmpty()) {
             _scanState.value = ScanState.Error("No previous results — run First Scan first"); return
@@ -1008,13 +1103,13 @@ class ScanViewModel : ViewModel() {
     // ---- Writing ----
 
     fun writeBulk(addresses: List<Long>, newValue: String) {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = requirePidForMemoryOp() ?: return
         val service = freezeService
         val bytes = ValueEncoder.encodeWriteValue(newValue, selectedValueType, xorKey) ?: return
         val addrSet = addresses.toSet()
         viewModelScope.launch(Dispatchers.IO) {
             val writes = addresses.map { it to bytes }
-            MemoryWriter.writeBytesMany(pid, writes)
+            provider().writeBytesBatch(pid, writes)
             // Update frozen bytes so freeze loop writes the new value
             if (service != null) {
                 for (addr in addresses) {
@@ -1039,7 +1134,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun toggleFreeze(result: ScanResult) {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = requirePidForMemoryOp() ?: return
         val service = freezeService ?: return
         if (result.frozen) service.removeFreeze(result.address)
         else service.addFreeze(pid, result.address, result.currentBytes)
@@ -1049,7 +1144,7 @@ class ScanViewModel : ViewModel() {
     }
 
     fun bulkFreezeSelected(freeze: Boolean) {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = requirePidForMemoryOp() ?: return
         val service = freezeService ?: return
         val selected = _results.value.filter { it.selected }
         for (r in selected) {
@@ -1063,13 +1158,13 @@ class ScanViewModel : ViewModel() {
     }
 
     fun writeBulkAndFreeze(addresses: List<Long>, newValue: String) {
-        val pid = selectedProcess.value?.pid ?: return
+        val pid = requirePidForMemoryOp() ?: return
         val service = freezeService ?: return
         val bytes = ValueEncoder.encodeWriteValue(newValue, selectedValueType, xorKey) ?: return
         val addrSet = addresses.toSet()
         viewModelScope.launch(Dispatchers.IO) {
             val writes = addresses.map { it to bytes }
-            MemoryWriter.writeBytesMany(pid, writes)
+            provider().writeBytesBatch(pid, writes)
             for (addr in addresses) {
                 service.addFreeze(pid, addr, bytes)
             }
@@ -1244,17 +1339,18 @@ class ScanViewModel : ViewModel() {
 
     fun activateSpeedHack() {
         val process = selectedProcess.value ?: return
+        val pid = effectivePid() ?: return
         val processName = process.name
         val packageName = process.packageName
 
         val active = SpeedControl.state.value
-        if (active.state == SpeedHackState.ACTIVE && active.targetPid != process.pid) {
+        if (active.state == SpeedHackState.ACTIVE && active.targetPid != pid) {
             SpeedInjector.reset()
         }
 
         viewModelScope.launch {
             if (selectedProcess.value?.packageName != packageName) return@launch
-            SpeedInjector.inject(process.pid, packageName, processName)
+            SpeedInjector.inject(pid, packageName, processName)
         }
     }
 

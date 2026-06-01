@@ -226,6 +226,28 @@ class MainActivity : ComponentActivity() {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
+        // Request Usage Access permission for virtual mode process detection
+        val usm = getSystemService(android.app.usage.UsageStatsManager::class.java)
+        val hasUsageAccess = usm?.queryUsageStats(
+            android.app.usage.UsageStatsManager.INTERVAL_DAILY,
+            System.currentTimeMillis() - 60_000, System.currentTimeMillis()
+        )?.isNotEmpty() == true
+        if (!hasUsageAccess && AppPrefs.operationMode == "virtual") {
+            Toast.makeText(this, "Grant Usage Access for virtual process detection", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+        }
+
+        if (AppPrefs.operationMode == "virtual" || AppPrefs.operationMode == "auto") {
+            if (com.androce.core.virtual.VirtualEngineFacade.needsAllFilesAccess()) {
+                Toast.makeText(
+                    this,
+                    "Allow “All files access” so cloned apps can stay open",
+                    Toast.LENGTH_LONG
+                ).show()
+                com.androce.core.virtual.VirtualEngineFacade.openAllFilesAccessSettings(this)
+            }
+        }
+
         // Check and request overlay permission if floating icon is enabled but permission not granted
         if (AppPrefs.floatingIconEnabled && !canDrawOverlays()) {
             showOverlayPermissionDialog.value = true
@@ -278,6 +300,32 @@ class MainActivity : ComponentActivity() {
                         // Check root access first
                         val rootGranted = Shell.getShell().isRoot
                         hasRootAccess = rootGranted
+
+                        if (!rootGranted && AppPrefs.operationMode == "auto") {
+                            // Auto-switch to virtual mode when no root
+                            AppPrefs.operationMode = "virtual"
+                        }
+
+                        if (AppPrefs.operationMode == "virtual") {
+                            // VA launch works without root; memory scan still uses root on guest PID.
+                            if (rootGranted) {
+                                if (!com.androce.core.MemoryReader.isNativeHelperReady) {
+                                    com.androce.core.MemoryReader.init(context)
+                                }
+                                scanVm.initSpeedInjector(context)
+                                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    context.startService(Intent(context, com.androce.core.FreezeService::class.java))
+                                    scanVm.bindFreezeService(context)
+                                }
+                            }
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                pythonReady = com.androce.core.MemoryReader.isPythonAvailable ||
+                                    com.androce.core.MemoryReader.isNativeHelperReady
+                                loading = false
+                            }
+                            return@withContext
+                        }
+
                         if (!rootGranted) {
                             withContext(kotlinx.coroutines.Dispatchers.Main) { loading = false }
                             return@withContext
@@ -308,8 +356,8 @@ class MainActivity : ComponentActivity() {
 
                 if (loading) {
                     LoadingScreen(message = "Checking root access...")
-                } else if (!hasRootAccess) {
-                    // Show error screen if root not granted
+                } else if (!hasRootAccess && AppPrefs.operationMode != "virtual") {
+                    // Show error screen with virtual mode option if root not granted and not already in virtual mode
                     Box(
                         Modifier.fillMaxSize().background(Background),
                         contentAlignment = Alignment.Center
@@ -319,9 +367,9 @@ class MainActivity : ComponentActivity() {
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
                             Icon(
-                                Icons.Default.Close,
+                                Icons.Default.Memory,
                                 contentDescription = null,
-                                tint = Error,
+                                tint = Primary,
                                 modifier = Modifier.size(64.dp)
                             )
                             Text(
@@ -331,16 +379,33 @@ class MainActivity : ComponentActivity() {
                                 fontSize = 20.sp
                             )
                             Text(
-                                "This app requires root access to function. Please grant root permission and restart the app.",
+                                "Root is required for direct memory scanning.\nYou can use Virtual Space mode to scan apps without root.",
                                 color = OnSurface,
                                 fontSize = 14.sp,
                                 textAlign = TextAlign.Center
                             )
                             Button(
-                                onClick = { forceExit() },
+                                onClick = {
+                                    AppPrefs.operationMode = "virtual"
+                                    loading = true
+                                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        kotlinx.coroutines.delay(300)
+                                        withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                            hasRootAccess = false
+                                            loading = false
+                                        }
+                                    }
+                                },
                                 colors = ButtonDefaults.buttonColors(containerColor = Primary)
                             ) {
-                                Text("Exit", color = Color.White)
+                                Text("Use Virtual Space (No Root)", color = Color.White)
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Button(
+                                onClick = { forceExit() },
+                                colors = ButtonDefaults.buttonColors(containerColor = SurfaceColor)
+                            ) {
+                                Text("Exit", color = OnBackground)
                             }
                         }
                     }
@@ -415,9 +480,43 @@ class MainActivity : ComponentActivity() {
                                 .fillMaxWidth(),
                             color = Background
                         ) {
+                            val isTargetRunning by processVm.isTargetRunning.collectAsState()
+                            val selectedProcessForBanner by scanVm.selectedProcess.collectAsState()
+                            Column(modifier = Modifier.fillMaxSize()) {
+                            // Process stopped/running banner shown on Scanner + Results tabs
+                            if (selectedProcessForBanner != null && selectedProcessForBanner!!.isVirtual &&
+                                isTargetRunning == false && (selectedTab == 1 || selectedTab == 2)) {
+                                androidx.compose.foundation.layout.Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Error.copy(alpha = 0.15f))
+                                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                                ) {
+                                    Text(
+                                        "⚠ Target process stopped — re-launch from Process tab",
+                                        color = Error,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                            androidx.compose.foundation.layout.Box(modifier = Modifier.weight(1f)) {
                             when (selectedTab) {
                             0 -> {
                                 val selectedProcess by scanVm.selectedProcess.collectAsState()
+                                val allProcesses by processVm.filteredProcesses.collectAsState()
+                                // Auto-upgrade: when process list refreshes with a real PID for the
+                                // selected virtual app (was unresolved), trigger setSelectedProcess
+                                LaunchedEffect(allProcesses) {
+                                    val sel = selectedProcess ?: return@LaunchedEffect
+                                    if (!sel.isVirtual) return@LaunchedEffect
+                                    val upgraded = allProcesses.firstOrNull {
+                                        it.packageName == sel.packageName && it.pid > 0
+                                    } ?: return@LaunchedEffect
+                                    if (upgraded.pid != sel.pid) {
+                                        scanVm.setSelectedProcess(upgraded)
+                                    }
+                                }
                                 ProcessListScreen(
                                     viewModel = processVm,
                                     selectedProcess = selectedProcess,
@@ -446,6 +545,8 @@ class MainActivity : ComponentActivity() {
                             }
                             4 -> SettingsScreen()
                             }
+                            } // Box weight(1f)
+                            } // Column
                         }
                     }
                 }

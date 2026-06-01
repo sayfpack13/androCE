@@ -30,6 +30,8 @@ object Scanner {
 
     @Volatile var paused: Boolean = false
 
+    private fun provider(): MemoryProvider = MemoryAccess.current
+
     /**
      * First scan: chunks regions to support pause/resume and intermediate progress.
      */
@@ -51,6 +53,7 @@ object Scanner {
         var capped = false
         val cap = MemoryReader.MAX_RESULTS
 
+        val p = provider()
         val chunks = filtered.chunked(REGION_CHUNK)
         var done = 0
         var lastProgressTime = 0L
@@ -59,7 +62,7 @@ object Scanner {
             while (paused) { delay(100); ensureActive() }
             val remaining = cap - allAddrs.size
             if (remaining <= 0) { capped = true; break }
-            val outcome = MemoryReader.scanAllRegions(pid, chunk, pattern, wildcard, maxResults = remaining)
+            val outcome = p.scanAllRegions(pid, chunk, pattern, wildcard, maxResults = remaining)
             allAddrs.addAll(outcome.addresses)
             totalSkipped += outcome.skipped
             if (outcome.capped) capped = true
@@ -74,7 +77,7 @@ object Scanner {
         // Read current bytes for all matched addresses in a single batch
         val results = if (allAddrs.isEmpty()) emptyList() else {
             val reqs = allAddrs.map { it to pattern.size }
-            val bytesList = MemoryReader.readBytesBatch(pid, reqs)
+            val bytesList = p.readBytesBatch(pid, reqs)
             allAddrs.mapIndexed { idx, addr ->
                 val bytes = bytesList[idx] ?: pattern.copyOf()
                 ScanResult(addr, valueType, bytes)
@@ -99,7 +102,7 @@ object Scanner {
         AppLogger.d(TAG, "refinedScan: pid=$pid count=${previousResults.size} pattern=${pattern.joinToString(" ") { "%02x".format(it) }} wildcard=${wildcard?.let { "%02x".format(it) }}")
         onProgress?.invoke(ScanProgress(0, previousResults.size, 0))
         val addrs = previousResults.map { it.address }
-        val survivors = MemoryReader.refinedScanBatch(pid, addrs, pattern, wildcard)
+        val survivors = provider().refinedScanBatch(pid, addrs, pattern, wildcard)
         val survivorMap = survivors.toMap()
         val out = previousResults.mapNotNull { prev ->
             val newBytes = survivorMap[prev.address] ?: return@mapNotNull null
@@ -137,7 +140,7 @@ object Scanner {
         val items = previousResults.map { r ->
             Triple(r.address, r.previousBytes, r.currentBytes.size)
         }
-        val survivors = MemoryReader.compareBatch(
+        val survivors = provider().compareBatch(
             pid, items, op.name, tcode, operand1, operand2
         ) { scanned, found ->
             onProgress?.invoke(ScanProgress(scanned, previousResults.size, found))
@@ -171,7 +174,7 @@ object Scanner {
         if (valueType.isVariableLength) return@withContext emptyList()
         val filtered = regions.filter { it.matchesFilter(regionFilter) }
         onProgress?.invoke(ScanProgress(0, filtered.size, 0))
-        val (items, skipped, capped) = MemoryReader.snapshotScanWithBytes(
+        val (items, skipped, capped) = provider().snapshotScanWithBytes(
             pid, filtered, valueType.byteSize, valueType.byteSize
         )
         val results = items.map { (addr, bytes) -> ScanResult(addr, valueType, bytes) }
@@ -187,7 +190,7 @@ object Scanner {
         withContext(Dispatchers.IO) {
             if (results.isEmpty()) return@withContext results
             val reqs = results.map { it.address to it.currentBytes.size }
-            val bytesList = MemoryReader.readBytesBatch(pid, reqs)
+            val bytesList = provider().readBytesBatch(pid, reqs)
             results.mapIndexed { idx, r ->
                 val raw = bytesList[idx]
                 if (raw == null) {

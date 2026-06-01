@@ -134,7 +134,8 @@ fun SearchScreen(
         viewModel.firstScan()
     }
 
-    val scansEnabled = selectedProcess != null && pythonReady
+    val scansEnabled = selectedProcess != null &&
+        (pythonReady || com.androce.core.MemoryReader.isNativeHelperReady)
 
     ScreenScaffold(
         title = "Memory Search",

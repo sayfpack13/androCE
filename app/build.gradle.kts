@@ -14,6 +14,15 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     buildTypes {
@@ -34,6 +43,7 @@ android {
     }
     buildFeatures {
         compose = true
+        aidl = true
     }
 
     sourceSets {
@@ -89,5 +99,6 @@ dependencies {
     implementation(libs.libsu.core)
     implementation(libs.libsu.service)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(project(":Bcore"))
     debugImplementation(libs.androidx.ui.tooling)
 }

@@ -135,14 +135,16 @@ fun ResultsScreen(
     // Auto-refresh timer: always enabled when results exist and no scan is running
     val isScanning = scanState is ScanState.Scanning
     val refreshInterval = AppPrefs.autoRefreshIntervalMs
-    LaunchedEffect(selectedProcess?.pid, results.isEmpty(), isScanning, refreshInterval) {
+    LaunchedEffect(selectedProcess?.packageName, results.isEmpty(), isScanning, refreshInterval) {
         if (selectedProcess == null || results.isEmpty() || isScanning || refreshInterval <= 0L) {
             return@LaunchedEffect
         }
-        val pid = selectedProcess!!.pid
+        val pkg = selectedProcess!!.packageName
         while (true) {
             delay(refreshInterval)
-            if (viewModel.selectedProcess.value?.pid != pid ||
+            val current = viewModel.selectedProcess.value
+            if (current?.packageName != pkg ||
+                viewModel.requireSelectedPid() == null ||
                 results.isEmpty() ||
                 scanState is ScanState.Scanning
             ) break

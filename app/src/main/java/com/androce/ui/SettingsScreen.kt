@@ -227,11 +227,46 @@ fun SettingsScreen() {
             try {
                 val snapshots = mutableListOf<RequirementSnapshot>()
 
-                val root = Shell.isAppGrantedRoot()
-                snapshots.add(
-                    if (root == true) RequirementSnapshot("Root access", "Root granted", RequirementLevel.OK)
-                    else RequirementSnapshot("Root access", "Root not available — app cannot function", RequirementLevel.FAIL)
-                )
+                val isVirtualMode = AppPrefs.operationMode == "virtual" ||
+                    (AppPrefs.operationMode == "auto" && Shell.isAppGrantedRoot() != true)
+
+                if (isVirtualMode) {
+                    snapshots.add(
+                        RequirementSnapshot(
+                            "Operation mode",
+                            "Virtual Space — clone GUI in sandbox",
+                            RequirementLevel.OK
+                        )
+                    )
+                    val root = Shell.isAppGrantedRoot()
+                    snapshots.add(
+                        if (root == true) {
+                            RequirementSnapshot("Root access", "Required to scan guest PID via /proc/<pid>/mem", RequirementLevel.OK)
+                        } else {
+                            RequirementSnapshot(
+                                "Root access",
+                                "Required to scan cloned app process (launch clone still works)",
+                                RequirementLevel.WARN
+                            )
+                        }
+                    )
+                    snapshots.add(
+                        RequirementSnapshot(
+                            "Memory access",
+                            if (root == true) {
+                                "Root: direct guest PID scan"
+                            } else {
+                                "Non-root: guest /proc/self bridge (no Magisk required)"
+                            },
+                            RequirementLevel.OK
+                        )
+                    )
+                } else {
+                    val root = Shell.isAppGrantedRoot()
+                    snapshots.add(
+                        if (root == true) RequirementSnapshot("Root access", "Root granted", RequirementLevel.OK)
+                        else RequirementSnapshot("Root access", "Root not available — app cannot function", RequirementLevel.FAIL)
+                    )
 
                 // Enhanced swap detection
                 val detectedSwapInfo = DependencyInstaller.detectSwapType()
@@ -369,6 +404,8 @@ fun SettingsScreen() {
                     }
                 )
 
+                } // end root-mode else block
+
                 withContext(Dispatchers.Main) {
                     RequirementsCache.snapshots = snapshots
                     requirements = buildStatusList(snapshots, ::runChecks)
@@ -391,7 +428,9 @@ fun SettingsScreen() {
         }
     }
 
-    val fridaReady = requirements
+    val isVirtualMode = AppPrefs.operationMode == "virtual" ||
+        (AppPrefs.operationMode == "auto" && Shell.isAppGrantedRoot() != true)
+    val fridaReady = isVirtualMode || requirements
         .firstOrNull { it.label == "Frida (speed hack)" }
         ?.level == RequirementLevel.OK
 

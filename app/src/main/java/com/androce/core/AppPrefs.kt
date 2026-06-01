@@ -30,6 +30,11 @@ object AppPrefs {
         get() = prefs.getString("default_region_filter", "all") ?: "all"
         set(value) = prefs.edit().putString("default_region_filter", value).apply()
 
+    /** Operation mode: "auto" (root if available, else virtual), "root" (force root), "virtual" (force virtual) */
+    var operationMode: String
+        get() = prefs.getString("operation_mode", "auto") ?: "auto"
+        set(value) = prefs.edit().putString("operation_mode", value).apply()
+
     /** Scan engine: "auto", "python", "native". Default "auto". */
     var scanEngine: String
         get() = prefs.getString("scan_engine", "auto") ?: "auto"

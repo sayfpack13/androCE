@@ -16,3 +16,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "androCE"
 include(":app")
+include(":Bcore")
+project(":Bcore").projectDir = file("virtual-engine/Bcore")
+include(":black-reflection")
+project(":black-reflection").projectDir = file("virtual-engine/black-reflection")
+include(":compiler")
+project(":compiler").projectDir = file("virtual-engine/compiler")

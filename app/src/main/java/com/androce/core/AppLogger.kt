@@ -33,9 +33,9 @@ object AppLogger {
         }
     }
 
-    @Suppress("UNUSED_PARAMETER")
     fun d(tag: String, msg: String) {
-        /* debug logging disabled — use AppLogger.e for failures */
+        Log.d("androCE.$tag", msg)
+        write("D", tag, msg)
     }
 
     fun i(tag: String, msg: String) {
